@@ -276,3 +276,83 @@ with st.sidebar:
 # Footer
 st.markdown("---")
 st.caption("Infrastructure AI v2.0 • AI-powered planning tool")
+
+
+# Add custom CSS for better UI
+st.markdown("""
+<style>
+    /* Main container */
+    .main {
+        padding: 0 1rem;
+    }
+    
+    /* Cards styling */
+    .stMetric {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border-radius: 10px;
+        padding: 20px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    
+    .stMetric label {
+        color: white !important;
+        font-weight: bold;
+    }
+    
+    .stMetric div {
+        color: white !important;
+        font-size: 1.5em;
+    }
+    
+    /* Buttons */
+    .stButton > button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        border-radius: 10px;
+        padding: 12px 24px;
+        font-weight: bold;
+        transition: all 0.3s;
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 12px rgba(0, 0, 0, 0.2);
+    }
+    
+    /* Headers */
+    h1 {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        padding-bottom: 10px;
+    }
+    
+    /* Success/Error boxes */
+    .stAlert {
+        border-radius: 10px;
+        border-left: 5px solid;
+    }
+    
+    /* Sidebar */
+    .css-1d391kg {
+        background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+    }
+    
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 2px;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 10px 10px 0 0;
+        padding: 10px 20px;
+    }
+    
+    /* Progress bar */
+    .stProgress > div > div > div {
+        background: linear-gradient(90deg, #4CAF50, #8BC34A);
+    }
+</style>
+""", unsafe_allow_html=True)
