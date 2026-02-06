@@ -1,11 +1,8 @@
-# requirements.txt
-streamlit==1.28.0
-pandas==2.0.3
+# requirements.txt (UPDATED)
+streamlit==1.29.0
+pandas==2.1.4
 numpy==1.24.3
-plotly==5.17.0
-scikit-learn==1.3.0
-seaborn==0.12.2
-matplotlib==3.7.1
-geopy==2.3.0
-folium==0.14.0
-streamlit-folium==0.15.1
+plotly==5.18.0
+scikit-learn==1.3.2
+seaborn==0.13.0
+matplotlib==3.8.2
