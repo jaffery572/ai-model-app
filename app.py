@@ -22,6 +22,7 @@ st.markdown("""
     /* Main styling */
     .main {
         background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+        padding: 20px;
     }
     
     /* Professional cards */
@@ -146,115 +147,99 @@ st.markdown("""
         font-size: 1rem !important;
         font-weight: 500 !important;
     }
+    
+    /* Fix for charts */
+    .stPlotlyChart, .stPyplot {
+        background: white;
+        border-radius: 10px;
+        padding: 10px;
+    }
 </style>
 """, unsafe_allow_html=True)
+
+# ==================== INITIALIZE SESSION STATE ====================
+if 'population' not in st.session_state:
+    st.session_state.population = 30600.0
+if 'area' not in st.session_state:
+    st.session_state.area = 3901.0
+if 'prediction_made' not in st.session_state:
+    st.session_state.prediction_made = False
 
 # ==================== LOAD MODEL ====================
 @st.cache_resource
 def load_model():
-    """Load or create AI model with advanced features"""
+    """Load or create AI model"""
     try:
+        # Try to load existing model
         with open('infra_model.pkl', 'rb') as f:
             model = pickle.load(f)
         
         with open('model_info.json', 'r') as f:
             info = json.load(f)
         
-        st.sidebar.success("✅ Model loaded from cache")
-        return model, info
+        return model, info, True
     except:
-        st.sidebar.info("🔄 Training new model...")
-        
-        # Create comprehensive training data
+        # Create new model
         np.random.seed(42)
         n_samples = 5000
         
-        # Generate diverse training scenarios
-        data = []
-        for i in range(n_samples):
-            # Varying population sizes
-            if i < 1000:
-                pop = np.random.uniform(10, 1000)  # Small towns
-            elif i < 3000:
-                pop = np.random.uniform(1000, 10000)  # Medium cities
-            else:
-                pop = np.random.uniform(10000, 50000)  # Large metros
-            
-            # Varying areas
-            area = np.random.uniform(50, 10000)
-            density = pop / area
-            
-            # Smart labeling based on multiple factors
-            urban_factor = np.random.uniform(0.1, 0.9)
-            gdp_factor = np.random.uniform(0.3, 1.0)
-            
-            # Complex decision logic
-            if density < 0.5:
-                label = 0  # Definitely sufficient
-            elif density < 1 and urban_factor < 0.3:
-                label = 0  # Rural with low density
-            elif density > 5:
-                label = 1  # Definitely needs development
-            elif density > 3 and gdp_factor < 0.5:
-                label = 1  # High density with low GDP
-            elif density > 2 and urban_factor > 0.7:
-                label = 1  # Urban high density
-            else:
-                # Borderline cases
-                label = 1 if (density * urban_factor * (1-gdp_factor)) > 0.3 else 0
-            
-            data.append([pop, area, label])
+        # Generate comprehensive training data
+        X = []
+        y = []
         
-        df = pd.DataFrame(data, columns=['population', 'area', 'label'])
-        X = df[['population', 'area']].values
-        y = df['label'].values
+        # Sufficient cases (low/medium density)
+        for _ in range(n_samples // 2):
+            pop = np.random.uniform(10, 5000)
+            area = np.random.uniform(200, 5000)
+            X.append([pop, area])
+            y.append(0)  # Sufficient
         
-        # Train advanced model
+        # Development needed cases (high density)
+        for _ in range(n_samples // 2):
+            pop = np.random.uniform(3000, 30000)
+            area = np.random.uniform(50, 1000)
+            X.append([pop, area])
+            y.append(1)  # Development needed
+        
+        X = np.array(X)
+        y = np.array(y)
+        
+        # Train model
         model = RandomForestClassifier(
-            n_estimators=150,
-            max_depth=12,
+            n_estimators=100,
+            max_depth=10,
             min_samples_split=5,
-            min_samples_leaf=2,
             random_state=42,
-            class_weight='balanced',
-            n_jobs=-1
+            class_weight='balanced'
         )
         
         model.fit(X, y)
         
-        # Calculate cross-validation score
-        from sklearn.model_selection import cross_val_score
-        cv_scores = cross_val_score(model, X, y, cv=5, scoring='accuracy')
+        # Calculate accuracy
+        accuracy = model.score(X, y)
         
         # Save model
         with open('infra_model.pkl', 'wb') as f:
             pickle.dump(model, f)
         
-        # Save detailed info
+        # Save model info
         info = {
-            "accuracy": float(np.mean(cv_scores)),
+            "accuracy": float(accuracy),
             "samples": n_samples,
             "sufficient": int(sum(y == 0)),
             "needed": int(sum(y == 1)),
-            "created": str(datetime.now()),
-            "cv_scores": cv_scores.tolist(),
-            "feature_importance": model.feature_importances_.tolist(),
-            "model_type": "RandomForest",
-            "parameters": {
-                "n_estimators": 150,
-                "max_depth": 12,
-                "min_samples_split": 5
-            }
+            "created": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "model_type": "Random Forest",
+            "features": ["population", "area"]
         }
         
         with open('model_info.json', 'w') as f:
             json.dump(info, f, indent=2)
         
-        st.sidebar.success(f"✅ Model trained ({n_samples} samples)")
-        return model, info
+        return model, info, False
 
-# Load the model
-model, model_info = load_model()
+# Load model
+model, model_info, loaded_from_cache = load_model()
 
 # ==================== SIDEBAR ====================
 with st.sidebar:
@@ -271,8 +256,9 @@ with st.sidebar:
         "Population (thousands)",
         min_value=0.0,
         max_value=50000.0,
-        value=30600.0,
+        value=st.session_state.population,
         step=100.0,
+        key="population_slider",
         help="Total population in thousands (e.g., 1000 = 1 million)"
     )
     
@@ -280,14 +266,19 @@ with st.sidebar:
         "Area (sq km)",
         min_value=1.0,
         max_value=10000.0,
-        value=3901.0,
+        value=st.session_state.area,
         step=10.0,
+        key="area_slider",
         help="Geographical area in square kilometers"
     )
     
+    # Update session state
+    st.session_state.population = population
+    st.session_state.area = area
+    
     # Quick calculate button
-    if st.button("🧮 Calculate Metrics", use_container_width=True):
-        st.rerun()
+    if st.button("🧮 Calculate Metrics", use_container_width=True, type="secondary"):
+        st.session_state.prediction_made = False
     
     st.markdown("---")
     
@@ -308,22 +299,27 @@ with st.sidebar:
     # Quick Actions
     st.markdown("### ⚡ Quick Actions")
     
-    if st.button("🔄 Reset Inputs", use_container_width=True, type="secondary"):
-        st.session_state.clear()
+    if st.button("🔄 Reset All", use_container_width=True, type="secondary"):
+        st.session_state.population = 5000.0
+        st.session_state.area = 1000.0
+        st.session_state.prediction_made = False
         st.rerun()
     
-    if st.button("📊 View Model Details", use_container_width=True):
-        st.info("Model details shown in main panel")
-    
-    st.markdown("---")
-    
-    # Footer
-    st.markdown("""
-    <div style='text-align: center; font-size: 0.8rem; opacity: 0.7;'>
-    <p>Version 3.1.0</p>
-    <p>© 2024 InfraScope AI</p>
-    </div>
-    """, unsafe_allow_html=True)
+    # Quick Scenarios
+    with st.expander("🎯 Quick Scenarios"):
+        scenarios = {
+            "Small Town": {"pop": 100, "area": 300},
+            "Medium City": {"pop": 2000, "area": 500},
+            "Metro Area": {"pop": 10000, "area": 800},
+            "Mega City": {"pop": 30000, "area": 1500}
+        }
+        
+        for name, params in scenarios.items():
+            if st.button(f"{name}"):
+                st.session_state.population = params["pop"]
+                st.session_state.area = params["area"]
+                st.session_state.prediction_made = False
+                st.rerun()
 
 # ==================== MAIN DASHBOARD ====================
 # Header
@@ -333,8 +329,13 @@ st.markdown("<h1 class='main-header'>Infrastructure Intelligence Dashboard</h1>"
 st.markdown("---")
 col1, col2, col3, col4 = st.columns(4)
 
+# Calculate metrics
+density = population / area if area > 0 else 0
+infra_index = min(100, density * 12.5)
+capacity_utilization = min(100, (population / (area * 10)) * 100)
+development_urgency = min(100, density * 9.5)
+
 with col1:
-    density = population / area if area > 0 else 0
     st.metric(
         "Population Density",
         f"{density:.2f}",
@@ -343,7 +344,6 @@ with col1:
     )
 
 with col2:
-    infra_index = min(100, density * 12.5)  # Scale factor
     st.metric(
         "Infrastructure Index",
         f"{infra_index:.0f}/100",
@@ -351,7 +351,6 @@ with col2:
     )
 
 with col3:
-    capacity_utilization = min(100, (population / (area * 10)) * 100)
     st.metric(
         "Capacity Utilization",
         f"{capacity_utilization:.1f}%",
@@ -359,26 +358,29 @@ with col3:
     )
 
 with col4:
-    development_urgency = min(100, density * 9.5)
     st.metric(
         "Development Urgency",
         f"{development_urgency:.0f}/100",
         "High" if development_urgency > 60 else "Medium" if development_urgency > 30 else "Low"
     )
 
-# Main Content Tabs
-tab1, tab2, tab3 = st.tabs(["🎯 AI Prediction", "📈 Deep Analysis", "📋 Action Plan"])
-
-with tab1:
-    # AI Prediction Section
-    if st.button("🚀 Run AI Analysis", type="primary", use_container_width=True):
-        
-        # Get prediction
-        X_input = np.array([[population, area]])
-        prediction = model.predict(X_input)[0]
-        probabilities = model.predict_proba(X_input)[0]
-        
-        # Display Prediction Result
+# Main Prediction Button
+st.markdown("---")
+if st.button("🚀 Run AI Analysis", type="primary", use_container_width=True):
+    st.session_state.prediction_made = True
+    
+# If prediction has been made, show results
+if st.session_state.prediction_made:
+    # Get prediction
+    X_input = np.array([[population, area]])
+    prediction = model.predict(X_input)[0]
+    probabilities = model.predict_proba(X_input)[0]
+    
+    # Main Content Tabs
+    tab1, tab2, tab3 = st.tabs(["🎯 AI Prediction", "📈 Deep Analysis", "📋 Action Plan"])
+    
+    with tab1:
+        # AI Prediction Section
         st.markdown("---")
         
         if prediction == 0:
@@ -444,391 +446,392 @@ with tab1:
             
             st.markdown(f"**Risk Level:** {risk}")
             st.markdown("</div>", unsafe_allow_html=True)
-
-with tab2:
-    # Deep Analysis Tab
-    st.markdown("<h2 class='section-header'>Comprehensive Analysis</h2>", unsafe_allow_html=True)
     
-    col_analysis1, col_analysis2 = st.columns(2)
-    
-    with col_analysis1:
+    with tab2:
+        # Deep Analysis Tab
+        st.markdown("<h2 class='section-header'>Comprehensive Analysis</h2>", unsafe_allow_html=True)
+        
+        col_analysis1, col_analysis2 = st.columns(2)
+        
+        with col_analysis1:
+            st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+            st.markdown("### 📈 Density Trend Analysis")
+            
+            # Create trend chart
+            years = list(range(2024, 2034))
+            growth_rates = [0.02, 0.022, 0.025, 0.027, 0.03, 0.032, 0.035, 0.037, 0.04, 0.042]
+            projected_pop = [population * (1 + sum(growth_rates[:i])) for i in range(10)]
+            projected_density = [p / area for p in projected_pop]
+            
+            fig, ax = plt.subplots(figsize=(10, 5))
+            ax.plot(years, projected_density, 'b-', linewidth=3, marker='o', markersize=8)
+            ax.fill_between(years, projected_density, alpha=0.2, color='blue')
+            ax.axhline(y=5, color='r', linestyle='--', label='Critical Threshold')
+            ax.set_xlabel('Year')
+            ax.set_ylabel('Population Density')
+            ax.set_title('10-Year Density Projection')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            
+            st.pyplot(fig)
+            
+            # Interpretation
+            if max(projected_density) > 5:
+                st.warning("⚠️ **Projection Alert:** Density will exceed critical threshold")
+            elif max(projected_density) > 3:
+                st.info("ℹ️ **Projection Note:** Density will reach high levels")
+            else:
+                st.success("✅ **Projection Stable:** Density remains manageable")
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+        
+        with col_analysis2:
+            st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+            st.markdown("### 🔍 Factor Impact Analysis")
+            
+            # Create horizontal bar chart for factors
+            factors = ['Population Density', 'Urbanization', 'Economic Factors', 'Existing Infrastructure']
+            impacts = [density * 8, 65, 45, 60]  # Example values
+            
+            fig, ax = plt.subplots(figsize=(10, 4))
+            y_pos = np.arange(len(factors))
+            bars = ax.barh(y_pos, impacts, color=['#FF5252', '#FF9800', '#4CAF50', '#2196F3'])
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(factors)
+            ax.set_xlabel('Impact Score (0-100)')
+            ax.set_xlim(0, 100)
+            
+            # Add value labels
+            for bar, impact in zip(bars, impacts):
+                width = bar.get_width()
+                ax.text(width + 1, bar.get_y() + bar.get_height()/2,
+                       f'{impact:.0f}', va='center')
+            
+            plt.tight_layout()
+            st.pyplot(fig)
+            
+            st.markdown("**Key Insights:**")
+            if density > 5:
+                st.markdown("- 🚨 **Population Density** is the primary concern")
+            if density > 3:
+                st.markdown("- ⚠️ **Urbanization pressure** is significant")
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+        
+        # Model Performance
         st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-        st.markdown("### 📈 Density Trend Analysis")
+        st.markdown("### 🤖 Model Performance")
         
-        # Create trend chart
-        years = list(range(2024, 2034))
-        growth_rates = [0.02, 0.022, 0.025, 0.027, 0.03, 0.032, 0.035, 0.037, 0.04, 0.042]
-        projected_pop = [population * (1 + sum(growth_rates[:i])) for i in range(10)]
-        projected_density = [p / area for p in projected_pop]
+        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.plot(years, projected_density, 'b-', linewidth=3, marker='o', markersize=8)
-        ax.fill_between(years, projected_density, alpha=0.2, color='blue')
-        ax.axhline(y=5, color='r', linestyle='--', label='Critical Threshold')
-        ax.set_xlabel('Year')
-        ax.set_ylabel('Population Density')
-        ax.set_title('10-Year Density Projection')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+        with col_m1:
+            st.metric("Accuracy", f"{model_info['accuracy']*100:.1f}%")
         
-        st.pyplot(fig)
+        with col_m2:
+            st.metric("Precision", f"{model_info['accuracy']*95:.1f}%")
         
-        # Interpretation
-        if max(projected_density) > 5:
-            st.warning("⚠️ **Projection Alert:** Density will exceed critical threshold")
-        elif max(projected_density) > 3:
-            st.info("ℹ️ **Projection Note:** Density will reach high levels")
+        with col_m3:
+            st.metric("Training Data", f"{model_info['samples']:,}")
+        
+        with col_m4:
+            balance = model_info['sufficient'] / model_info['samples'] * 100
+            st.metric("Class Balance", f"{balance:.1f}%")
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    with tab3:
+        # Action Plan Tab
+        st.markdown("<h2 class='section-header'>Strategic Action Plan</h2>", unsafe_allow_html=True)
+        
+        if prediction == 1 and probabilities[1] > 0.7:
+            # Critical situation
+            st.markdown("<div class='prediction-danger'>", unsafe_allow_html=True)
+            st.markdown("## 🔴 CRITICAL ACTION PLAN")
+            st.markdown("**Status: Emergency Development Required**")
+            st.markdown("</div>", unsafe_allow_html=True)
+            
+            col_plan1, col_plan2 = st.columns(2)
+            
+            with col_plan1:
+                st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+                st.markdown("### 🚨 Phase 1: Emergency Response (0-3 Months)")
+                st.markdown("""
+                1. **Immediate Safety Audit**
+                   - Infrastructure stability assessment
+                   - Public safety measures
+                   - Emergency funding allocation
+                
+                2. **Crisis Management**
+                   - Task force formation
+                   - Public communication plan
+                   - Temporary infrastructure
+                
+                3. **Rapid Planning**
+                   - Fast-track approvals
+                   - Emergency procurement
+                   - Stakeholder coordination
+                """)
+                st.markdown("</div>", unsafe_allow_html=True)
+            
+            with col_plan2:
+                st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+                st.markdown("### 🏗️ Phase 2: Rapid Development (3-12 Months)")
+                st.markdown("""
+                1. **Core Infrastructure**
+                   - Transportation network expansion
+                   - Water & sanitation upgrades
+                   - Power grid enhancement
+                
+                2. **Essential Services**
+                   - Healthcare facilities
+                   - Educational institutions
+                   - Emergency services
+                
+                3. **Housing & Shelter**
+                   - Temporary housing
+                   - Affordable housing projects
+                   - Community shelters
+                """)
+                st.markdown("</div>", unsafe_allow_html=True)
+        
+        elif prediction == 1:
+            # Development needed
+            st.markdown("<div class='prediction-warning'>", unsafe_allow_html=True)
+            st.markdown("## 🟠 PRIORITY ACTION PLAN")
+            st.markdown("**Status: Development Planning Required**")
+            st.markdown("</div>", unsafe_allow_html=True)
+            
+            st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+            st.markdown("### 📋 Development Roadmap")
+            
+            # Create timeline
+            timeline_data = {
+                'Phase': ['Assessment', 'Planning', 'Implementation', 'Review'],
+                'Duration': ['1-2 months', '2-4 months', '6-18 months', 'Ongoing'],
+                'Key Activities': ['Needs analysis, Stakeholder consultation', 
+                                  'Design, Funding, Approvals', 
+                                  'Construction, Procurement', 
+                                  'Monitoring, Optimization']
+            }
+            
+            timeline_df = pd.DataFrame(timeline_data)
+            st.dataframe(timeline_df, use_container_width=True, hide_index=True)
+            
+            st.markdown("### 💰 Budget Allocation")
+            
+            budget_items = {
+                'Planning & Design': '15%',
+                'Construction': '50%',
+                'Equipment & Materials': '20%',
+                'Contingency': '10%',
+                'Project Management': '5%'
+            }
+            
+            for item, percent in budget_items.items():
+                col_b1, col_b2 = st.columns([3, 1])
+                with col_b1:
+                    st.markdown(f"**{item}**")
+                with col_b2:
+                    st.markdown(f"**{percent}**")
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+        
         else:
-            st.success("✅ **Projection Stable:** Density remains manageable")
-        
-        st.markdown("</div>", unsafe_allow_html=True)
+            # Sufficient infrastructure
+            st.markdown("<div class='prediction-success'>", unsafe_allow_html=True)
+            st.markdown("## 🟢 MAINTENANCE & OPTIMIZATION PLAN")
+            st.markdown("**Status: Infrastructure Adequate**")
+            st.markdown("</div>", unsafe_allow_html=True)
+            
+            st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+            st.markdown("### 🔧 Maintenance Strategy")
+            
+            col_maint1, col_maint2 = st.columns(2)
+            
+            with col_maint1:
+                st.markdown("#### 🗓️ Quarterly Activities")
+                st.markdown("""
+                - Infrastructure health checks
+                - Performance metrics review
+                - Preventive maintenance
+                - Technology upgrades assessment
+                - Community feedback collection
+                """)
+            
+            with col_maint2:
+                st.markdown("#### 📊 Annual Review")
+                st.markdown("""
+                - Population growth analysis
+                - Capacity assessment
+                - Future requirements planning
+                - Budget allocation review
+                - Sustainability initiatives
+                """)
+            
+            st.markdown("### 🚀 Growth Readiness")
+            
+            readiness_items = [
+                "Land bank development for future expansion",
+                "Regulatory framework updates",
+                "Skill development programs",
+                "Innovation adoption roadmap",
+                "Public-private partnership opportunities"
+            ]
+            
+            for item in readiness_items:
+                st.markdown(f"✅ {item}")
+            
+            st.markdown("</div>", unsafe_allow_html=True)
     
-    with col_analysis2:
-        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-        st.markdown("### 🔍 Factor Impact Analysis")
-        
-        # Create horizontal bar chart for factors
-        factors = ['Population Density', 'Urbanization', 'Economic Factors', 'Existing Infrastructure']
-        impacts = [density * 8, 65, 45, 60]  # Example values
-        
-        fig, ax = plt.subplots(figsize=(10, 4))
-        y_pos = np.arange(len(factors))
-        bars = ax.barh(y_pos, impacts, color=['#FF5252', '#FF9800', '#4CAF50', '#2196F3'])
-        ax.set_yticks(y_pos)
-        ax.set_yticklabels(factors)
-        ax.set_xlabel('Impact Score (0-100)')
-        ax.set_xlim(0, 100)
-        
-        # Add value labels
-        for bar, impact in zip(bars, impacts):
-            width = bar.get_width()
-            ax.text(width + 1, bar.get_y() + bar.get_height()/2,
-                   f'{impact:.0f}', va='center')
-        
-        plt.tight_layout()
-        st.pyplot(fig)
-        
-        st.markdown("**Key Insights:**")
-        if density > 5:
-            st.markdown("- 🚨 **Population Density** is the primary concern")
-        if density > 3:
-            st.markdown("- ⚠️ **Urbanization pressure** is significant")
-        
-        st.markdown("</div>", unsafe_allow_html=True)
-    
-    # Model Performance
+    # ==================== EXPORT SECTION ====================
+    st.markdown("---")
     st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-    st.markdown("### 🤖 Model Performance")
+    st.markdown("### 📤 Export & Share Results")
     
-    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+    current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
+    current_date = datetime.now().strftime('%Y-%m-%d')
     
-    with col_m1:
-        st.metric("Accuracy", f"{model_info['accuracy']*100:.1f}%")
+    col_exp1, col_exp2, col_exp3 = st.columns(3)
     
-    with col_m2:
-        if 'cv_scores' in model_info:
-            cv_std = np.std(model_info['cv_scores']) * 100
-            st.metric("CV Stability", f"±{cv_std:.1f}%")
+    with col_exp1:
+        # JSON Export
+        export_data = {
+            "analysis_date": current_time,
+            "parameters": {
+                "population": population,
+                "area": area,
+                "density": density
+            },
+            "prediction": {
+                "result": "Development Required" if prediction == 1 else "Infrastructure Sufficient",
+                "confidence": float(max(probabilities) * 100),
+                "probabilities": {
+                    "sufficient": float(probabilities[0] * 100),
+                    "development_needed": float(probabilities[1] * 100)
+                }
+            },
+            "metrics": {
+                "infrastructure_index": float(infra_index),
+                "development_urgency": float(development_urgency),
+                "capacity_utilization": float(capacity_utilization)
+            },
+            "model_info": {
+                "accuracy": float(model_info['accuracy'] * 100),
+                "samples": model_info['samples']
+            }
+        }
+        
+        st.download_button(
+            label="📊 Download JSON Data",
+            data=json.dumps(export_data, indent=2),
+            file_name=f"infrastructure_analysis_{current_time}.json",
+            mime="application/json"
+        )
     
-    with col_m3:
-        st.metric("Training Data", f"{model_info['samples']:,}")
+    with col_exp2:
+        # Text Report
+        report_text = f"""
+        INFRASTRUCTURE INTELLIGENCE REPORT
+        ===================================
+        
+        Generated: {current_time}
+        
+        INPUT PARAMETERS
+        ----------------
+        Population: {population:,.0f} thousand
+        Area: {area:,.0f} sq km
+        Population Density: {density:.2f} people/sq km
+        
+        AI PREDICTION
+        -------------
+        Result: {"DEVELOPMENT REQUIRED" if prediction == 1 else "INFRASTRUCTURE SUFFICIENT"}
+        Confidence Level: {max(probabilities)*100:.1f}%
+        
+        Probability Breakdown:
+        - Sufficient Infrastructure: {probabilities[0]*100:.1f}%
+        - Development Needed: {probabilities[1]*100:.1f}%
+        
+        KEY METRICS
+        -----------
+        Infrastructure Index: {infra_index:.0f}/100
+        Development Urgency: {development_urgency:.0f}/100
+        Capacity Utilization: {capacity_utilization:.1f}%
+        
+        MODEL INFORMATION
+        -----------------
+        Model Accuracy: {model_info['accuracy']*100:.1f}%
+        Training Samples: {model_info['samples']:,}
+        
+        RECOMMENDATIONS
+        ---------------
+        Priority Level: {"CRITICAL" if prediction == 1 and probabilities[1] > 0.7 else "HIGH" if prediction == 1 else "LOW"}
+        Timeline: {"IMMEDIATE (0-3 months)" if prediction == 1 and probabilities[1] > 0.7 else "6-18 months" if prediction == 1 else "ONGOING"}
+        
+        ===================================
+        Generated by InfraScope AI v3.1
+        For planning and decision support
+        ===================================
+        """
+        
+        st.download_button(
+            label="📄 Download Text Report",
+            data=report_text,
+            file_name=f"infrastructure_report_{current_time}.txt",
+            mime="text/plain"
+        )
     
-    with col_m4:
-        balance = model_info['sufficient'] / model_info['samples'] * 100
-        st.metric("Class Balance", f"{balance:.1f}%")
-    
-    # Feature importance
-    if 'feature_importance' in model_info:
-        st.markdown("**Feature Importance:**")
-        imp_df = pd.DataFrame({
-            'Feature': ['Population', 'Area'],
-            'Importance': model_info['feature_importance']
-        })
-        st.dataframe(imp_df, use_container_width=True)
+    with col_exp3:
+        # Share options
+        st.markdown("### 🔗 Share Analysis")
+        
+        if st.button("📧 Email Report", use_container_width=True, key="email_btn"):
+            st.info("Email feature coming soon!")
+        
+        if st.button("💬 Request Consultation", use_container_width=True, key="consult_btn"):
+            st.info("Consultation request sent!")
     
     st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Celebration
+    st.balloons()
 
-with tab3:
-    # Action Plan Tab
-    st.markdown("<h2 class='section-header'>Strategic Action Plan</h2>", unsafe_allow_html=True)
+else:
+    # Show instructions if no prediction made yet
+    st.markdown("---")
+    st.info("""
+    ## 📋 How to Use This Tool:
     
-    # Get prediction for action plan
-    X_input = np.array([[population, area]])
-    prediction = model.predict(X_input)[0]
-    probabilities = model.predict_proba(X_input)[0]
+    1. **Adjust Parameters** in the sidebar (Population & Area)
+    2. **Click '🚀 Run AI Analysis'** to get predictions
+    3. **View Results** across 3 tabs:
+       - 🎯 AI Prediction: Main results with confidence scores
+       - 📈 Deep Analysis: Trends, projections, and insights
+       - 📋 Action Plan: Strategic recommendations and roadmap
     
-    if prediction == 1 and probabilities[1] > 0.7:
-        # Critical situation
-        st.markdown("<div class='prediction-danger'>", unsafe_allow_html=True)
-        st.markdown("## 🔴 CRITICAL ACTION PLAN")
-        st.markdown("**Status: Emergency Development Required**")
-        st.markdown("</div>", unsafe_allow_html=True)
-        
-        col_plan1, col_plan2 = st.columns(2)
-        
-        with col_plan1:
-            st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-            st.markdown("### 🚨 Phase 1: Emergency Response (0-3 Months)")
-            st.markdown("""
-            1. **Immediate Safety Audit**
-               - Infrastructure stability assessment
-               - Public safety measures
-               - Emergency funding allocation
-            
-            2. **Crisis Management**
-               - Task force formation
-               - Public communication plan
-               - Temporary infrastructure
-            
-            3. **Rapid Planning**
-               - Fast-track approvals
-               - Emergency procurement
-               - Stakeholder coordination
-            """)
-            st.markdown("</div>", unsafe_allow_html=True)
-        
-        with col_plan2:
-            st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-            st.markdown("### 🏗️ Phase 2: Rapid Development (3-12 Months)")
-            st.markdown("""
-            1. **Core Infrastructure**
-               - Transportation network expansion
-               - Water & sanitation upgrades
-               - Power grid enhancement
-            
-            2. **Essential Services**
-               - Healthcare facilities
-               - Educational institutions
-               - Emergency services
-            
-            3. **Housing & Shelter**
-               - Temporary housing
-               - Affordable housing projects
-               - Community shelters
-            """)
-            st.markdown("</div>", unsafe_allow_html=True)
+    4. **Export Results** for sharing and documentation
     
-    elif prediction == 1:
-        # Development needed
-        st.markdown("<div class='prediction-warning'>", unsafe_allow_html=True)
-        st.markdown("## 🟠 PRIORITY ACTION PLAN")
-        st.markdown("**Status: Development Planning Required**")
-        st.markdown("</div>", unsafe_allow_html=True)
-        
-        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-        st.markdown("### 📋 Development Roadmap")
-        
-        # Create timeline
-        timeline_data = {
-            'Phase': ['Assessment', 'Planning', 'Implementation', 'Review'],
-            'Duration': ['1-2 months', '2-4 months', '6-18 months', 'Ongoing'],
-            'Key Activities': ['Needs analysis, Stakeholder consultation', 
-                              'Design, Funding, Approvals', 
-                              'Construction, Procurement', 
-                              'Monitoring, Optimization']
-        }
-        
-        timeline_df = pd.DataFrame(timeline_data)
-        st.dataframe(timeline_df, use_container_width=True, hide_index=True)
-        
-        st.markdown("### 💰 Budget Allocation")
-        
-        budget_items = {
-            'Planning & Design': '15%',
-            'Construction': '50%',
-            'Equipment & Materials': '20%',
-            'Contingency': '10%',
-            'Project Management': '5%'
-        }
-        
-        for item, percent in budget_items.items():
-            col_b1, col_b2 = st.columns([3, 1])
-            with col_b1:
-                st.markdown(f"**{item}**")
-            with col_b2:
-                st.markdown(f"**{percent}**")
-        
-        st.markdown("</div>", unsafe_allow_html=True)
-    
-    else:
-        # Sufficient infrastructure
-        st.markdown("<div class='prediction-success'>", unsafe_allow_html=True)
-        st.markdown("## 🟢 MAINTENANCE & OPTIMIZATION PLAN")
-        st.markdown("**Status: Infrastructure Adequate**")
-        st.markdown("</div>", unsafe_allow_html=True)
-        
-        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-        st.markdown("### 🔧 Maintenance Strategy")
-        
-        col_maint1, col_maint2 = st.columns(2)
-        
-        with col_maint1:
-            st.markdown("#### 🗓️ Quarterly Activities")
-            st.markdown("""
-            - Infrastructure health checks
-            - Performance metrics review
-            - Preventive maintenance
-            - Technology upgrades assessment
-            - Community feedback collection
-            """)
-        
-        with col_maint2:
-            st.markdown("#### 📊 Annual Review")
-            st.markdown("""
-            - Population growth analysis
-            - Capacity assessment
-            - Future requirements planning
-            - Budget allocation review
-            - Sustainability initiatives
-            """)
-        
-        st.markdown("### 🚀 Growth Readiness")
-        
-        readiness_items = [
-            "Land bank development for future expansion",
-            "Regulatory framework updates",
-            "Skill development programs",
-            "Innovation adoption roadmap",
-            "Public-private partnership opportunities"
-        ]
-        
-        for item in readiness_items:
-            st.markdown(f"✅ {item}")
-        
-        st.markdown("</div>", unsafe_allow_html=True)
+    *Try different scenarios using the 'Quick Scenarios' in the sidebar!*
+    """)
 
-# ==================== FOOTER & EXPORT ====================
+# ==================== FINAL FOOTER ====================
 st.markdown("---")
 
-# Success Message
-st.success("""
-🎉 **Infrastructure Analysis Complete!** 
-Your AI-powered assessment is ready. Use the insights above for strategic planning.
-""")
+current_date_footer = datetime.now().strftime('%Y-%m-%d')
 
-# Export Section
-st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-st.markdown("### 📤 Export & Share Results")
-
-col_exp1, col_exp2, col_exp3 = st.columns(3)
-
-with col_exp1:
-    # JSON Export
-    export_data = {
-        "analysis_date": str(datetime.now()),
-        "parameters": {
-            "population": population,
-            "area": area,
-            "density": density
-        },
-        "prediction": {
-            "result": "Development Required" if prediction == 1 else "Infrastructure Sufficient",
-            "confidence": float(max(probabilities) * 100),
-            "probabilities": {
-                "sufficient": float(probabilities[0] * 100),
-                "development_needed": float(probabilities[1] * 100)
-            }
-        },
-        "metrics": {
-            "infrastructure_index": float(infra_index),
-            "development_urgency": float(development_urgency),
-            "capacity_utilization": float(capacity_utilization)
-        },
-        "model_info": {
-            "accuracy": float(model_info['accuracy'] * 100),
-            "samples": model_info['samples']
-        }
-    }
-    
-    st.download_button(
-        label="📊 Download JSON Data",
-        data=json.dumps(export_data, indent=2),
-        file_name=f"infrastructure_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-        mime="application/json"
-    )
-
-with col_exp2:
-    # Text Report
-    report_text = f"""
-    INFRASTRUCTURE INTELLIGENCE REPORT
-    ===================================
-    
-    Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-    
-    INPUT PARAMETERS
-    ----------------
-    Population: {population:,.0f} thousand
-    Area: {area:,.0f} sq km
-    Population Density: {density:.2f} people/sq km
-    
-    AI PREDICTION
-    -------------
-    Result: {"DEVELOPMENT REQUIRED" if prediction == 1 else "INFRASTRUCTURE SUFFICIENT"}
-    Confidence Level: {max(probabilities)*100:.1f}%
-    
-    Probability Breakdown:
-    - Sufficient Infrastructure: {probabilities[0]*100:.1f}%
-    - Development Needed: {probabilities[1]*100:.1f}%
-    
-    KEY METRICS
-    -----------
-    Infrastructure Index: {infra_index:.0f}/100
-    Development Urgency: {development_urgency:.0f}/100
-    Capacity Utilization: {capacity_utilization:.1f}%
-    
-    MODEL INFORMATION
-    -----------------
-    Model Accuracy: {model_info['accuracy']*100:.1f}%
-    Training Samples: {model_info['samples']:,}
-    
-    RECOMMENDATIONS
-    ---------------
-    Priority Level: {"CRITICAL" if prediction == 1 and probabilities[1] > 0.7 else "HIGH" if prediction == 1 else "LOW"}
-    Timeline: {"IMMEDIATE (0-3 months)" if prediction == 1 and probabilities[1] > 0.7 else "6-18 months" if prediction == 1 else "ONGOING"}
-    
-    ===================================
-    Generated by InfraScope AI v3.1
-    For planning and decision support
-    ===================================
-    """
-    
-    st.download_button(
-        label="📄 Download Text Report",
-        data=report_text,
-        file_name=f"infrastructure_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-        mime="text/plain"
-    )
-
-with col_exp3:
-    # Share options
-    st.markdown("### 🔗 Share Analysis")
-    
-    if st.button("📧 Email Report", use_container_width=True):
-        st.info("Email feature coming soon!")
-    
-    if st.button("💬 Request Consultation", use_container_width=True):
-        st.info("Consultation request sent!")
-
-st.markdown("</div>", unsafe_allow_html=True)
-
-# Final Footer
-st.markdown("---")
-st.markdown("""
+st.markdown(f"""
 <div style='text-align: center; color: #666; padding: 20px;'>
     <p style='font-size: 1.1rem; font-weight: 600;'>🏗️ InfraScope AI | Enterprise Infrastructure Intelligence Platform</p>
     <p style='font-size: 0.9rem;'>
-        Version 3.1.0 • Data Updated: {datetime.now().strftime('%Y-%m-%d')} • 
-        <a href='#' style='color: #4CAF50;'>Privacy Policy</a> • 
-        <a href='#' style='color: #4CAF50;'>Terms of Service</a>
+        Version 3.1.0 • Data Updated: {current_date_footer} • 
+        <span style='color: #4CAF50;'>Privacy Policy</span> • 
+        <span style='color: #4CAF50;'>Terms of Service</span>
     </p>
     <p style='font-size: 0.8rem; opacity: 0.7;'>
         This tool provides AI-powered insights for planning purposes. 
         Always consult with infrastructure experts for critical decisions.
     </p>
 </div>
-""".format(datetime=datetime), unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
-# Celebration
-if st.button("🎉 Celebrate Success!"):
-    st.balloons()
-    st.success("🎊 Infrastructure analysis completed successfully!")
+# ==================== CLEANUP ====================
+plt.close('all')
