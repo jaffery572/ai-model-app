@@ -3,18 +3,14 @@ import pickle
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
 import json
 import os
 from datetime import datetime
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report
 
 # ==================== PAGE CONFIG ====================
 st.set_page_config(
-    page_title="InfraScope AI | Infrastructure Intelligence Platform",
+    page_title="InfraScope AI | Infrastructure Intelligence",
     page_icon="🏗️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -25,108 +21,138 @@ st.markdown("""
 <style>
     /* Main styling */
     .main {
-        padding: 2rem;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
     }
     
-    /* Cards */
+    /* Professional cards */
     .metric-card {
         background: white;
-        border-radius: 15px;
+        border-radius: 12px;
         padding: 20px;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        box-shadow: 0 6px 20px rgba(0,0,0,0.08);
         margin-bottom: 20px;
-        border-left: 5px solid #667eea;
+        border-top: 4px solid #4CAF50;
+        transition: transform 0.3s;
     }
     
-    .prediction-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    .metric-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 10px 25px rgba(0,0,0,0.12);
+    }
+    
+    /* Prediction cards */
+    .prediction-success {
+        background: linear-gradient(135deg, #00b09b 0%, #96c93d 100%);
         color: white;
         border-radius: 15px;
-        padding: 25px;
-        box-shadow: 0 15px 35px rgba(0,0,0,0.2);
+        padding: 30px;
+        margin-bottom: 25px;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+    }
+    
+    .prediction-warning {
+        background: linear-gradient(135deg, #ff7e5f 0%, #feb47b 100%);
+        color: white;
+        border-radius: 15px;
+        padding: 30px;
+        margin-bottom: 25px;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+    }
+    
+    .prediction-danger {
+        background: linear-gradient(135deg, #ff416c 0%, #ff4b2b 100%);
+        color: white;
+        border-radius: 15px;
+        padding: 30px;
+        margin-bottom: 25px;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.15);
     }
     
     /* Headers */
-    .section-header {
-        background: linear-gradient(90deg, #667eea, #764ba2);
+    .main-header {
+        background: linear-gradient(90deg, #4CAF50, #2196F3);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         font-weight: 800;
-        font-size: 2rem;
+        font-size: 2.5rem;
+        margin-bottom: 1rem;
+    }
+    
+    .section-header {
+        color: #2c3e50;
+        font-weight: 700;
+        font-size: 1.8rem;
         margin-bottom: 1.5rem;
+        border-bottom: 3px solid #4CAF50;
+        padding-bottom: 10px;
     }
     
     /* Buttons */
     .stButton > button {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        background: linear-gradient(135deg, #4CAF50 0%, #2E7D32 100%);
         color: white;
         border: none;
         border-radius: 10px;
-        padding: 15px 30px;
-        font-weight: bold;
-        font-size: 1.1rem;
+        padding: 12px 24px;
+        font-weight: 600;
+        font-size: 1rem;
         transition: all 0.3s;
-        width: 100%;
+        box-shadow: 0 4px 15px rgba(76, 175, 80, 0.3);
     }
     
     .stButton > button:hover {
-        transform: translateY(-3px);
-        box-shadow: 0 10px 20px rgba(0,0,0,0.2);
-    }
-    
-    /* Tabs */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 10px;
-        background: #f8f9fa;
-        padding: 10px;
-        border-radius: 10px;
-    }
-    
-    .stTabs [data-baseweb="tab"] {
-        border-radius: 10px;
-        padding: 15px 25px;
-        background: white;
-        border: 1px solid #e0e0e0;
-        font-weight: 600;
-    }
-    
-    .stTabs [aria-selected="true"] {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
-        color: white !important;
-        border: none !important;
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(76, 175, 80, 0.4);
     }
     
     /* Sidebar */
     [data-testid="stSidebar"] {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
+        background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%);
     }
     
-    [data-testid="stSidebar"] h1, 
-    [data-testid="stSidebar"] h2, 
-    [data-testid="stSidebar"] h3,
-    [data-testid="stSidebar"] p {
+    [data-testid="stSidebar"] * {
         color: white !important;
+    }
+    
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 5px;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 10px 10px 0 0;
+        padding: 12px 24px;
+        font-weight: 600;
+        background: #f8f9fa;
+    }
+    
+    .stTabs [aria-selected="true"] {
+        background: #4CAF50 !important;
+        color: white !important;
+    }
+    
+    /* Progress bars */
+    .stProgress > div > div > div {
+        background: linear-gradient(90deg, #4CAF50, #8BC34A);
     }
     
     /* Metrics */
     [data-testid="stMetricValue"] {
-        font-size: 2rem !important;
-        font-weight: 800 !important;
+        font-size: 2.2rem !important;
+        font-weight: 700 !important;
     }
     
     [data-testid="stMetricLabel"] {
         font-size: 1rem !important;
-        opacity: 0.9;
+        font-weight: 500 !important;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# ==================== INITIALIZATION ====================
+# ==================== LOAD MODEL ====================
 @st.cache_resource
 def load_model():
-    """Load or create AI model"""
+    """Load or create AI model with advanced features"""
     try:
         with open('infra_model.pkl', 'rb') as f:
             model = pickle.load(f)
@@ -134,182 +160,174 @@ def load_model():
         with open('model_info.json', 'r') as f:
             info = json.load(f)
         
-        return model, info, True
+        st.sidebar.success("✅ Model loaded from cache")
+        return model, info
     except:
-        # Create a sophisticated model
+        st.sidebar.info("🔄 Training new model...")
+        
+        # Create comprehensive training data
         np.random.seed(42)
+        n_samples = 5000
         
-        # Advanced training data with multiple factors
-        n_samples = 10000
-        
-        # Generate comprehensive dataset
+        # Generate diverse training scenarios
         data = []
-        for _ in range(n_samples):
-            pop = np.random.uniform(10, 50000)
-            area = np.random.uniform(10, 10000)
+        for i in range(n_samples):
+            # Varying population sizes
+            if i < 1000:
+                pop = np.random.uniform(10, 1000)  # Small towns
+            elif i < 3000:
+                pop = np.random.uniform(1000, 10000)  # Medium cities
+            else:
+                pop = np.random.uniform(10000, 50000)  # Large metros
+            
+            # Varying areas
+            area = np.random.uniform(50, 10000)
             density = pop / area
             
-            # Multiple factors for decision
-            urban_rate = np.random.uniform(0.1, 1.0)
-            gdp = np.random.uniform(1000, 50000)
-            existing_infra = np.random.uniform(0.1, 1.0)
+            # Smart labeling based on multiple factors
+            urban_factor = np.random.uniform(0.1, 0.9)
+            gdp_factor = np.random.uniform(0.3, 1.0)
             
             # Complex decision logic
-            score = (
-                density * 0.4 + 
-                (1 - existing_infra) * 0.3 +
-                (1 - urban_rate) * 0.2 +
-                (1 - gdp/50000) * 0.1
-            )
+            if density < 0.5:
+                label = 0  # Definitely sufficient
+            elif density < 1 and urban_factor < 0.3:
+                label = 0  # Rural with low density
+            elif density > 5:
+                label = 1  # Definitely needs development
+            elif density > 3 and gdp_factor < 0.5:
+                label = 1  # High density with low GDP
+            elif density > 2 and urban_factor > 0.7:
+                label = 1  # Urban high density
+            else:
+                # Borderline cases
+                label = 1 if (density * urban_factor * (1-gdp_factor)) > 0.3 else 0
             
-            label = 1 if score > 0.5 else 0
-            
-            data.append([pop, area, urban_rate, gdp, existing_infra, label])
+            data.append([pop, area, label])
         
-        df = pd.DataFrame(data, columns=['population', 'area', 'urban_rate', 'gdp', 'existing_infra', 'label'])
-        
+        df = pd.DataFrame(data, columns=['population', 'area', 'label'])
         X = df[['population', 'area']].values
         y = df['label'].values
         
+        # Train advanced model
         model = RandomForestClassifier(
-            n_estimators=200,
-            max_depth=15,
+            n_estimators=150,
+            max_depth=12,
             min_samples_split=5,
             min_samples_leaf=2,
             random_state=42,
-            class_weight='balanced'
+            class_weight='balanced',
+            n_jobs=-1
         )
         
         model.fit(X, y)
         
-        # Calculate metrics
+        # Calculate cross-validation score
         from sklearn.model_selection import cross_val_score
-        scores = cross_val_score(model, X, y, cv=5)
+        cv_scores = cross_val_score(model, X, y, cv=5, scoring='accuracy')
         
         # Save model
         with open('infra_model.pkl', 'wb') as f:
             pickle.dump(model, f)
         
+        # Save detailed info
         info = {
-            "accuracy": float(np.mean(scores)),
+            "accuracy": float(np.mean(cv_scores)),
             "samples": n_samples,
             "sufficient": int(sum(y == 0)),
             "needed": int(sum(y == 1)),
             "created": str(datetime.now()),
-            "cv_scores": scores.tolist(),
-            "features": ["population", "area", "urban_rate", "gdp", "existing_infra"],
-            "model_params": {
-                "n_estimators": 200,
-                "max_depth": 15,
-                "algorithm": "Random Forest"
+            "cv_scores": cv_scores.tolist(),
+            "feature_importance": model.feature_importances_.tolist(),
+            "model_type": "RandomForest",
+            "parameters": {
+                "n_estimators": 150,
+                "max_depth": 12,
+                "min_samples_split": 5
             }
         }
         
         with open('model_info.json', 'w') as f:
             json.dump(info, f, indent=2)
         
-        return model, info, False
+        st.sidebar.success(f"✅ Model trained ({n_samples} samples)")
+        return model, info
 
-# Load model
-model, model_info, loaded_from_cache = load_model()
+# Load the model
+model, model_info = load_model()
 
 # ==================== SIDEBAR ====================
 with st.sidebar:
+    # Header
     st.markdown("<h1 style='text-align: center;'>🏗️ InfraScope AI</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; opacity: 0.9;'>Enterprise Infrastructure Intelligence</p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; opacity: 0.9;'>Intelligent Infrastructure Planning</p>", unsafe_allow_html=True)
     
     st.markdown("---")
     
-    # Quick Stats
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Model Accuracy", f"{model_info['accuracy']*100:.1f}%")
-    with col2:
-        st.metric("Training Samples", f"{model_info['samples']:,}")
-    
-    st.markdown("---")
-    
-    # Input Parameters
+    # Input Section
     st.markdown("### 📊 Input Parameters")
     
-    with st.form("input_form"):
-        population = st.slider(
-            "Population (thousands)",
-            min_value=0.0,
-            max_value=50000.0,
-            value=7000.0,
-            step=100.0,
-            help="Total population in thousands"
-        )
-        
-        area = st.slider(
-            "Area (sq km)",
-            min_value=1.0,
-            max_value=20000.0,
-            value=1400.0,
-            step=50.0,
-            help="Geographical area in square kilometers"
-        )
-        
-        # Advanced parameters
-        with st.expander("⚙️ Advanced Parameters"):
-            urban_rate = st.slider(
-                "Urban Population Rate",
-                min_value=0.0,
-                max_value=100.0,
-                value=65.0,
-                step=1.0
-            )
-            
-            gdp_per_capita = st.number_input(
-                "GDP per Capita (USD)",
-                min_value=0.0,
-                value=15000.0,
-                step=1000.0
-            )
-            
-            existing_infra = st.slider(
-                "Existing Infrastructure Score",
-                min_value=0.0,
-                max_value=10.0,
-                value=6.5,
-                step=0.1,
-                help="Score from 0 (poor) to 10 (excellent)"
-            )
-        
-        analyze_button = st.form_submit_button("🚀 Run Deep Analysis", type="primary")
+    population = st.slider(
+        "Population (thousands)",
+        min_value=0.0,
+        max_value=50000.0,
+        value=30600.0,
+        step=100.0,
+        help="Total population in thousands (e.g., 1000 = 1 million)"
+    )
+    
+    area = st.slider(
+        "Area (sq km)",
+        min_value=1.0,
+        max_value=10000.0,
+        value=3901.0,
+        step=10.0,
+        help="Geographical area in square kilometers"
+    )
+    
+    # Quick calculate button
+    if st.button("🧮 Calculate Metrics", use_container_width=True):
+        st.rerun()
     
     st.markdown("---")
     
-    # Quick Scenarios
-    st.markdown("### 🎯 Quick Scenarios")
+    # Model Information
+    st.markdown("### 🤖 Model Information")
     
-    scenarios = {
-        "🏙️ Mega City": {"pop": 15000, "area": 1500, "urban": 85, "gdp": 25000, "infra": 7.0},
-        "🌆 Metro Area": {"pop": 8000, "area": 1200, "urban": 75, "gdp": 18000, "infra": 6.5},
-        "🏘️ Mid-sized City": {"pop": 3000, "area": 800, "urban": 65, "gdp": 12000, "infra": 6.0},
-        "🏡 Small Town": {"pop": 500, "area": 300, "urban": 40, "gdp": 8000, "infra": 5.5},
-        "🌾 Rural Area": {"pop": 100, "area": 1000, "urban": 20, "gdp": 5000, "infra": 4.0}
-    }
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Accuracy", f"{model_info['accuracy']*100:.1f}%")
+    with col2:
+        st.metric("Samples", f"{model_info['samples']:,}")
     
-    for name, params in scenarios.items():
-        if st.button(name):
-            st.session_state.population = params["pop"]
-            st.session_state.area = params["area"]
-            st.session_state.urban_rate = params["urban"]
-            st.session_state.gdp_per_capita = params["gdp"]
-            st.session_state.existing_infra = params["infra"]
-            st.rerun()
+    st.markdown(f"**Model Type:** {model_info.get('model_type', 'Random Forest')}")
+    st.markdown(f"**Created:** {model_info.get('created', 'N/A')[:10]}")
+    
+    st.markdown("---")
+    
+    # Quick Actions
+    st.markdown("### ⚡ Quick Actions")
+    
+    if st.button("🔄 Reset Inputs", use_container_width=True, type="secondary"):
+        st.session_state.clear()
+        st.rerun()
+    
+    if st.button("📊 View Model Details", use_container_width=True):
+        st.info("Model details shown in main panel")
+    
+    st.markdown("---")
+    
+    # Footer
+    st.markdown("""
+    <div style='text-align: center; font-size: 0.8rem; opacity: 0.7;'>
+    <p>Version 3.1.0</p>
+    <p>© 2024 InfraScope AI</p>
+    </div>
+    """, unsafe_allow_html=True)
 
 # ==================== MAIN DASHBOARD ====================
 # Header
-col1, col2, col3 = st.columns([2, 3, 1])
-with col1:
-    st.markdown("<h1 class='section-header'>InfraScope AI Dashboard</h1>", unsafe_allow_html=True)
-with col2:
-    st.markdown(f"<p style='text-align: center; color: gray;'>Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>", unsafe_allow_html=True)
-with col3:
-    st.metric("Status", "🟢 LIVE", "Real-time")
+st.markdown("<h1 class='main-header'>Infrastructure Intelligence Dashboard</h1>", unsafe_allow_html=True)
 
 # Top Metrics Row
 st.markdown("---")
@@ -318,18 +336,18 @@ col1, col2, col3, col4 = st.columns(4)
 with col1:
     density = population / area if area > 0 else 0
     st.metric(
-        "Population Density", 
-        f"{density:.2f}", 
+        "Population Density",
+        f"{density:.2f}",
         "people/sq km",
         delta_color="off"
     )
 
 with col2:
-    infra_score = min(100, density * 2 + urban_rate + gdp_per_capita/1000)
+    infra_index = min(100, density * 12.5)  # Scale factor
     st.metric(
-        "Infrastructure Index", 
-        f"{infra_score:.0f}/100",
-        "High" if infra_score > 70 else "Medium" if infra_score > 40 else "Low"
+        "Infrastructure Index",
+        f"{infra_index:.0f}/100",
+        "High" if infra_index > 70 else "Medium" if infra_index > 40 else "Low"
     )
 
 with col3:
@@ -337,564 +355,480 @@ with col3:
     st.metric(
         "Capacity Utilization",
         f"{capacity_utilization:.1f}%",
-        "Over" if capacity_utilization > 80 else "Optimal"
+        "Optimal" if 60 <= capacity_utilization <= 80 else "Over" if capacity_utilization > 80 else "Under"
     )
 
 with col4:
-    development_urgency = min(100, density * 5 + (100 - existing_infra * 10))
+    development_urgency = min(100, density * 9.5)
     st.metric(
         "Development Urgency",
         f"{development_urgency:.0f}/100",
-        "Critical" if development_urgency > 80 else "High" if development_urgency > 60 else "Moderate"
+        "High" if development_urgency > 60 else "Medium" if development_urgency > 30 else "Low"
     )
 
-# Main Analysis Tabs
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📊 Prediction Analysis", 
-    "📈 Deep Insights", 
-    "🗺️ Geospatial View",
-    "📋 Action Plan",
-    "📊 Model Details"
-])
+# Main Content Tabs
+tab1, tab2, tab3 = st.tabs(["🎯 AI Prediction", "📈 Deep Analysis", "📋 Action Plan"])
 
 with tab1:
-    # Prediction Analysis
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.markdown("<div class='prediction-card'>", unsafe_allow_html=True)
-        st.markdown("## 🎯 AI Prediction Result")
+    # AI Prediction Section
+    if st.button("🚀 Run AI Analysis", type="primary", use_container_width=True):
         
         # Get prediction
         X_input = np.array([[population, area]])
         prediction = model.predict(X_input)[0]
         probabilities = model.predict_proba(X_input)[0]
         
+        # Display Prediction Result
+        st.markdown("---")
+        
         if prediction == 0:
-            st.markdown("""
-            <div style='background: linear-gradient(135deg, #00b09b, #96c93d); padding: 30px; border-radius: 15px; color: white;'>
-                <h1 style='color: white; margin: 0;'>✅ INFRASTRUCTURE ADEQUATE</h1>
-                <p style='font-size: 1.2rem; opacity: 0.9;'>Current infrastructure meets projected needs</p>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown("<div class='prediction-success'>", unsafe_allow_html=True)
+            st.markdown("# ✅ INFRASTRUCTURE SUFFICIENT")
+            st.markdown(f"### Confidence: {probabilities[0]*100:.1f}%")
+            st.markdown("The AI model indicates that current infrastructure is adequate for the given population and area.")
+            st.markdown("</div>", unsafe_allow_html=True)
         else:
-            st.markdown("""
-            <div style='background: linear-gradient(135deg, #ff416c, #ff4b2b); padding: 30px; border-radius: 15px; color: white;'>
-                <h1 style='color: white; margin: 0;'>🚨 DEVELOPMENT REQUIRED</h1>
-                <p style='font-size: 1.2rem; opacity: 0.9;'>Immediate infrastructure planning needed</p>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown("<div class='prediction-danger'>", unsafe_allow_html=True)
+            st.markdown("# 🚨 DEVELOPMENT REQUIRED")
+            st.markdown(f"### Confidence: {probabilities[1]*100:.1f}%")
+            st.markdown("The AI model indicates that infrastructure development is urgently needed.")
+            st.markdown("</div>", unsafe_allow_html=True)
         
-        st.markdown("</div>", unsafe_allow_html=True)
+        # Confidence Metrics
+        col_metrics1, col_metrics2 = st.columns(2)
         
-        # Probability Gauge
-        fig = go.Figure(go.Indicator(
-            mode = "gauge+number+delta",
-            value = probabilities[1] * 100,
-            domain = {'x': [0, 1], 'y': [0, 1]},
-            title = {'text': "Development Need Probability"},
-            delta = {'reference': 50},
-            gauge = {
-                'axis': {'range': [0, 100]},
-                'bar': {'color': "darkblue"},
-                'steps': [
-                    {'range': [0, 30], 'color': "green"},
-                    {'range': [30, 70], 'color': "yellow"},
-                    {'range': [70, 100], 'color': "red"}
-                ],
-                'threshold': {
-                    'line': {'color': "red", 'width': 4},
-                    'thickness': 0.75,
-                    'value': 70
-                }
-            }
-        ))
+        with col_metrics1:
+            st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+            st.markdown("### 📊 Probability Distribution")
+            
+            # Create pie chart
+            fig, ax = plt.subplots(figsize=(6, 6))
+            labels = ['Sufficient', 'Development Needed']
+            sizes = [probabilities[0]*100, probabilities[1]*100]
+            colors = ['#4CAF50', '#FF5252']
+            explode = (0.05, 0.05)
+            
+            ax.pie(sizes, explode=explode, labels=labels, colors=colors,
+                  autopct='%1.1f%%', shadow=True, startangle=90)
+            ax.axis('equal')
+            
+            st.pyplot(fig)
+            st.markdown("</div>", unsafe_allow_html=True)
         
-        fig.update_layout(height=300)
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with col2:
-        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-        st.markdown("### 📈 Confidence Metrics")
-        
-        st.metric(
-            "Model Confidence",
-            f"{max(probabilities)*100:.1f}%",
-            "High" if max(probabilities) > 0.8 else "Medium"
-        )
-        
-        st.progress(float(max(probabilities)))
-        
-        st.markdown("#### Probability Distribution")
-        prob_data = pd.DataFrame({
-            'Status': ['Adequate', 'Development Needed'],
-            'Probability': [probabilities[0]*100, probabilities[1]*100]
-        })
-        
-        fig = px.bar(prob_data, x='Status', y='Probability', 
-                    color='Status', color_discrete_map={
-                        'Adequate': '#00b09b', 
-                        'Development Needed': '#ff416c'
-                    })
-        fig.update_layout(height=200, showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-        
-        # Risk Assessment
-        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-        st.markdown("### ⚠️ Risk Assessment")
-        
-        risk_level = "LOW" if probabilities[1] < 0.3 else "MEDIUM" if probabilities[1] < 0.7 else "HIGH"
-        risk_color = "green" if risk_level == "LOW" else "orange" if risk_level == "MEDIUM" else "red"
-        
-        st.markdown(f"<h3 style='color: {risk_color};'>{risk_level} RISK</h3>", unsafe_allow_html=True)
-        st.markdown(f"**Impact:** {('Low', 'Medium', 'High')[['LOW', 'MEDIUM', 'HIGH'].index(risk_level)]}")
-        st.markdown(f"**Timeline:** {('1-3 years', '6-12 months', 'Immediate')[['LOW', 'MEDIUM', 'HIGH'].index(risk_level)]}")
-        st.markdown("</div>", unsafe_allow_html=True)
+        with col_metrics2:
+            st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+            st.markdown("### ⚖️ Confidence Metrics")
+            
+            st.metric(
+                "Model Confidence",
+                f"{max(probabilities)*100:.1f}%",
+                "High" if max(probabilities) > 0.8 else "Medium"
+            )
+            
+            st.progress(float(max(probabilities)))
+            
+            st.markdown("**Detailed Breakdown:**")
+            col_p1, col_p2 = st.columns(2)
+            with col_p1:
+                st.metric("Sufficient", f"{probabilities[0]*100:.1f}%")
+            with col_p2:
+                st.metric("Needed", f"{probabilities[1]*100:.1f}%")
+            
+            # Risk Level
+            if probabilities[1] > 0.7:
+                risk = "🔴 HIGH"
+            elif probabilities[1] > 0.4:
+                risk = "🟡 MEDIUM"
+            else:
+                risk = "🟢 LOW"
+            
+            st.markdown(f"**Risk Level:** {risk}")
+            st.markdown("</div>", unsafe_allow_html=True)
 
 with tab2:
-    # Deep Insights
-    col1, col2 = st.columns(2)
+    # Deep Analysis Tab
+    st.markdown("<h2 class='section-header'>Comprehensive Analysis</h2>", unsafe_allow_html=True)
     
-    with col1:
-        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-        st.markdown("### 📊 Comparative Analysis")
-        
-        # Generate comparison data
-        scenarios = pd.DataFrame({
-            'Scenario': ['Current', 'Low Growth', 'High Growth', 'Optimal'],
-            'Density': [density, density*0.7, density*1.5, density*0.9],
-            'Need_Probability': [probabilities[1], probabilities[1]*0.6, min(1, probabilities[1]*1.8), probabilities[1]*0.4]
-        })
-        
-        fig = make_subplots(specs=[[{"secondary_y": True}]])
-        
-        fig.add_trace(
-            go.Bar(x=scenarios['Scenario'], y=scenarios['Density'], 
-                  name="Density", marker_color='#667eea'),
-            secondary_y=False,
-        )
-        
-        fig.add_trace(
-            go.Scatter(x=scenarios['Scenario'], y=scenarios['Need_Probability']*100,
-                      name="Need Probability", mode='lines+markers',
-                      line=dict(color='#ff416c', width=3)),
-            secondary_y=True,
-        )
-        
-        fig.update_layout(
-            title="Scenario Analysis",
-            height=400
-        )
-        
-        fig.update_yaxes(title_text="Population Density", secondary_y=False)
-        fig.update_yaxes(title_text="Need Probability (%)", secondary_y=True)
-        
-        st.plotly_chart(fig, use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+    col_analysis1, col_analysis2 = st.columns(2)
     
-    with col2:
+    with col_analysis1:
         st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-        st.markdown("### 📈 Trend Projection")
+        st.markdown("### 📈 Density Trend Analysis")
         
-        # Project density over time
+        # Create trend chart
         years = list(range(2024, 2034))
-        growth_rates = [0.02, 0.025, 0.03, 0.035, 0.04, 0.045, 0.05, 0.055, 0.06, 0.065]
-        projected_density = [density * (1 + sum(growth_rates[:i])) for i in range(10)]
+        growth_rates = [0.02, 0.022, 0.025, 0.027, 0.03, 0.032, 0.035, 0.037, 0.04, 0.042]
+        projected_pop = [population * (1 + sum(growth_rates[:i])) for i in range(10)]
+        projected_density = [p / area for p in projected_pop]
         
-        # Calculate need probability over time
-        projected_need = [min(100, d * 5) for d in projected_density]
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.plot(years, projected_density, 'b-', linewidth=3, marker='o', markersize=8)
+        ax.fill_between(years, projected_density, alpha=0.2, color='blue')
+        ax.axhline(y=5, color='r', linestyle='--', label='Critical Threshold')
+        ax.set_xlabel('Year')
+        ax.set_ylabel('Population Density')
+        ax.set_title('10-Year Density Projection')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
         
-        fig = go.Figure()
+        st.pyplot(fig)
         
-        fig.add_trace(go.Scatter(
-            x=years, y=projected_density,
-            mode='lines+markers',
-            name='Population Density',
-            line=dict(color='#667eea', width=3),
-            fill='tozeroy'
-        ))
+        # Interpretation
+        if max(projected_density) > 5:
+            st.warning("⚠️ **Projection Alert:** Density will exceed critical threshold")
+        elif max(projected_density) > 3:
+            st.info("ℹ️ **Projection Note:** Density will reach high levels")
+        else:
+            st.success("✅ **Projection Stable:** Density remains manageable")
         
-        fig.add_trace(go.Scatter(
-            x=years, y=projected_need,
-            mode='lines',
-            name='Development Need Index',
-            line=dict(color='#ff416c', width=3, dash='dash'),
-            yaxis='y2'
-        ))
-        
-        fig.update_layout(
-            title="10-Year Projection",
-            yaxis=dict(title="Population Density"),
-            yaxis2=dict(title="Development Need Index", overlaying='y', side='right'),
-            height=400
-        )
-        
-        # Add threshold line
-        fig.add_hline(y=5, line_dash="dot", line_color="red", 
-                     annotation_text="Critical Threshold", 
-                     annotation_position="bottom right")
-        
-        st.plotly_chart(fig, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
     
-    # Factor Analysis
+    with col_analysis2:
+        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+        st.markdown("### 🔍 Factor Impact Analysis")
+        
+        # Create horizontal bar chart for factors
+        factors = ['Population Density', 'Urbanization', 'Economic Factors', 'Existing Infrastructure']
+        impacts = [density * 8, 65, 45, 60]  # Example values
+        
+        fig, ax = plt.subplots(figsize=(10, 4))
+        y_pos = np.arange(len(factors))
+        bars = ax.barh(y_pos, impacts, color=['#FF5252', '#FF9800', '#4CAF50', '#2196F3'])
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(factors)
+        ax.set_xlabel('Impact Score (0-100)')
+        ax.set_xlim(0, 100)
+        
+        # Add value labels
+        for bar, impact in zip(bars, impacts):
+            width = bar.get_width()
+            ax.text(width + 1, bar.get_y() + bar.get_height()/2,
+                   f'{impact:.0f}', va='center')
+        
+        plt.tight_layout()
+        st.pyplot(fig)
+        
+        st.markdown("**Key Insights:**")
+        if density > 5:
+            st.markdown("- 🚨 **Population Density** is the primary concern")
+        if density > 3:
+            st.markdown("- ⚠️ **Urbanization pressure** is significant")
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Model Performance
     st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-    st.markdown("### 🔍 Factor Impact Analysis")
+    st.markdown("### 🤖 Model Performance")
     
-    factors = ['Population Density', 'Urbanization Rate', 'GDP per Capita', 'Existing Infrastructure']
-    impacts = [density * 40, urban_rate * 0.3, (50000 - gdp_per_capita) / 500, (10 - existing_infra) * 8]
+    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
     
-    fig = px.bar(
-        x=factors, y=impacts,
-        color=impacts,
-        color_continuous_scale=['green', 'yellow', 'red'],
-        labels={'x': 'Factors', 'y': 'Impact Score'},
-        height=300
-    )
+    with col_m1:
+        st.metric("Accuracy", f"{model_info['accuracy']*100:.1f}%")
     
-    fig.update_layout(showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
+    with col_m2:
+        if 'cv_scores' in model_info:
+            cv_std = np.std(model_info['cv_scores']) * 100
+            st.metric("CV Stability", f"±{cv_std:.1f}%")
+    
+    with col_m3:
+        st.metric("Training Data", f"{model_info['samples']:,}")
+    
+    with col_m4:
+        balance = model_info['sufficient'] / model_info['samples'] * 100
+        st.metric("Class Balance", f"{balance:.1f}%")
+    
+    # Feature importance
+    if 'feature_importance' in model_info:
+        st.markdown("**Feature Importance:**")
+        imp_df = pd.DataFrame({
+            'Feature': ['Population', 'Area'],
+            'Importance': model_info['feature_importance']
+        })
+        st.dataframe(imp_df, use_container_width=True)
+    
     st.markdown("</div>", unsafe_allow_html=True)
 
 with tab3:
-    # Geospatial View
-    col1, col2 = st.columns([3, 1])
+    # Action Plan Tab
+    st.markdown("<h2 class='section-header'>Strategic Action Plan</h2>", unsafe_allow_html=True)
     
-    with col1:
-        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-        st.markdown("### 🗺️ Geospatial Analysis")
-        
-        # Create synthetic geographic data
-        np.random.seed(42)
-        n_points = 50
-        
-        lats = np.random.uniform(28.0, 29.0, n_points)
-        lons = np.random.uniform(76.0, 77.0, n_points)
-        sizes = np.random.uniform(10, 100, n_points)
-        colors = np.random.uniform(0, 1, n_points)
-        
-        # Add main location
-        lats = np.append(lats, 28.6139)
-        lons = np.append(lons, 77.2090)
-        sizes = np.append(sizes, 150)
-        colors = np.append(colors, probabilities[1])
-        
-        fig = px.scatter_mapbox(
-            lat=lats,
-            lon=lons,
-            size=sizes,
-            color=colors,
-            color_continuous_scale=px.colors.diverging.RdYlGn_r,
-            size_max=50,
-            zoom=8,
-            height=500
-        )
-        
-        fig.update_layout(
-            mapbox_style="carto-positron",
-            margin={"r":0,"t":0,"l":0,"b":0}
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
+    # Get prediction for action plan
+    X_input = np.array([[population, area]])
+    prediction = model.predict(X_input)[0]
+    probabilities = model.predict_proba(X_input)[0]
+    
+    if prediction == 1 and probabilities[1] > 0.7:
+        # Critical situation
+        st.markdown("<div class='prediction-danger'>", unsafe_allow_html=True)
+        st.markdown("## 🔴 CRITICAL ACTION PLAN")
+        st.markdown("**Status: Emergency Development Required**")
         st.markdown("</div>", unsafe_allow_html=True)
+        
+        col_plan1, col_plan2 = st.columns(2)
+        
+        with col_plan1:
+            st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+            st.markdown("### 🚨 Phase 1: Emergency Response (0-3 Months)")
+            st.markdown("""
+            1. **Immediate Safety Audit**
+               - Infrastructure stability assessment
+               - Public safety measures
+               - Emergency funding allocation
+            
+            2. **Crisis Management**
+               - Task force formation
+               - Public communication plan
+               - Temporary infrastructure
+            
+            3. **Rapid Planning**
+               - Fast-track approvals
+               - Emergency procurement
+               - Stakeholder coordination
+            """)
+            st.markdown("</div>", unsafe_allow_html=True)
+        
+        with col_plan2:
+            st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+            st.markdown("### 🏗️ Phase 2: Rapid Development (3-12 Months)")
+            st.markdown("""
+            1. **Core Infrastructure**
+               - Transportation network expansion
+               - Water & sanitation upgrades
+               - Power grid enhancement
+            
+            2. **Essential Services**
+               - Healthcare facilities
+               - Educational institutions
+               - Emergency services
+            
+            3. **Housing & Shelter**
+               - Temporary housing
+               - Affordable housing projects
+               - Community shelters
+            """)
+            st.markdown("</div>", unsafe_allow_html=True)
     
-    with col2:
-        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-        st.markdown("### 📍 Location Insights")
-        
-        st.metric("Region Type", "Urban", "Metropolitan")
-        st.metric("Infrastructure Age", "15 years", "Mid-life")
-        st.metric("Growth Rate", "3.2%", "Above Average")
-        st.metric("Land Availability", "Limited", "Constraint")
-        
-        st.markdown("### 🏗️ Nearby Projects")
-        projects = [
-            {"name": "Metro Phase 4", "status": "Ongoing", "impact": "High"},
-            {"name": "Smart City", "status": "Planned", "impact": "Very High"},
-            {"name": "Road Widening", "status": "Completed", "impact": "Medium"},
-            {"name": "Water Plant", "status": "Delayed", "impact": "High"}
-        ]
-        
-        for project in projects:
-            st.markdown(f"**{project['name']}**")
-            st.markdown(f"Status: {project['status']} | Impact: {project['impact']}")
-            st.markdown("---")
-        
+    elif prediction == 1:
+        # Development needed
+        st.markdown("<div class='prediction-warning'>", unsafe_allow_html=True)
+        st.markdown("## 🟠 PRIORITY ACTION PLAN")
+        st.markdown("**Status: Development Planning Required**")
         st.markdown("</div>", unsafe_allow_html=True)
-
-with tab4:
-    # Action Plan
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.markdown("<div class='prediction-card'>", unsafe_allow_html=True)
         
-        if prediction == 1 and probabilities[1] > 0.7:
-            st.markdown("## 🚨 CRITICAL ACTION REQUIRED")
-            
-            st.markdown("""
-            ### 🔴 Phase 1: Emergency Response (0-3 Months)
-            
-            **Immediate Actions:**
-            1. **Emergency Task Force Formation** (Week 1)
-            2. **Infrastructure Safety Audit** (Week 2-4)
-            3. **Temporary Mitigation Measures** (Month 1-2)
-            4. **Public Communication Plan** (Ongoing)
-            5. **Emergency Funding Allocation** (Week 1)
-            
-            ### 🟠 Phase 2: Rapid Development (3-12 Months)
-            
-            **Priority Projects:**
-            - Transportation Network Expansion
-            - Water & Sanitation Upgrades
-            - Healthcare Facility Enhancement
-            - Educational Infrastructure
-            - Housing Development
-            
-            ### 🟡 Phase 3: Sustainable Growth (1-3 Years)
-            
-            **Long-term Strategy:**
-            - Smart City Integration
-            - Renewable Energy Systems
-            - Digital Infrastructure
-            - Green Spaces Development
-            """)
-        
-        elif prediction == 1:
-            st.markdown("## ⚠️ HIGH PRIORITY DEVELOPMENT NEEDED")
-            
-            st.markdown("""
-            ### 🟠 Phase 1: Planning & Assessment (1-6 Months)
-            
-            **Key Activities:**
-            1. **Detailed Needs Assessment** (Month 1-2)
-            2. **Stakeholder Consultation** (Month 2-3)
-            3. **Funding Strategy Development** (Month 3-4)
-            4. **Environmental Impact Study** (Month 4-5)
-            5. **Detailed Project Reports** (Month 5-6)
-            
-            ### 🟡 Phase 2: Implementation (6-24 Months)
-            
-            **Implementation Plan:**
-            - Phased Infrastructure Development
-            - Public-Private Partnerships
-            - Technology Integration
-            - Community Engagement
-            - Regular Progress Reviews
-            
-            ### 🟢 Phase 3: Monitoring & Optimization (24+ Months)
-            
-            **Sustainability Measures:**
-            - Performance Monitoring System
-            - Regular Maintenance Schedule
-            - Capacity Building
-            - Continuous Improvement
-            """)
-        
-        else:
-            st.markdown("## ✅ INFRASTRUCTURE ADEQUATE")
-            
-            st.markdown("""
-            ### 🟢 Maintenance & Optimization Strategy
-            
-            **Quarterly Activities:**
-            1. **Infrastructure Health Check**
-            2. **Performance Metrics Review**
-            3. **Preventive Maintenance**
-            4. **Technology Upgrades Assessment**
-            
-            ### 📊 Capacity Planning
-            
-            **Annual Review:**
-            - Population Growth Analysis
-            - Infrastructure Capacity Assessment
-            - Future Requirements Planning
-            - Budget Allocation Review
-            
-            ### 🚀 Growth Readiness
-            
-            **Proactive Measures:**
-            - Land Bank Development
-            - Regulatory Framework Updates
-            - Skill Development Programs
-            - Innovation Adoption Roadmap
-            """)
-        
-        st.markdown("</div>", unsafe_allow_html=True)
-    
-    with col2:
         st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-        st.markdown("### 📋 Project Timeline")
+        st.markdown("### 📋 Development Roadmap")
         
-        # Gantt chart data
-        tasks = [
-            {"Task": "Assessment", "Start": 0, "Finish": 2, "Resource": "Planning"},
-            {"Task": "Design", "Start": 2, "Finish": 4, "Resource": "Engineering"},
-            {"Task": "Approval", "Start": 4, "Finish": 5, "Resource": "Legal"},
-            {"Task": "Construction", "Start": 5, "Finish": 12, "Resource": "Construction"},
-            {"Task": "Commissioning", "Start": 12, "Finish": 13, "Resource": "Operations"}
-        ]
+        # Create timeline
+        timeline_data = {
+            'Phase': ['Assessment', 'Planning', 'Implementation', 'Review'],
+            'Duration': ['1-2 months', '2-4 months', '6-18 months', 'Ongoing'],
+            'Key Activities': ['Needs analysis, Stakeholder consultation', 
+                              'Design, Funding, Approvals', 
+                              'Construction, Procurement', 
+                              'Monitoring, Optimization']
+        }
         
-        df = pd.DataFrame(tasks)
+        timeline_df = pd.DataFrame(timeline_data)
+        st.dataframe(timeline_df, use_container_width=True, hide_index=True)
         
-        fig = px.timeline(df, x_start="Start", x_end="Finish", y="Task", color="Resource",
-                         color_discrete_sequence=px.colors.qualitative.Set3)
-        
-        fig.update_yaxes(autorange="reversed")
-        fig.update_layout(height=400)
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        st.markdown("### 💰 Budget Estimate")
+        st.markdown("### 💰 Budget Allocation")
         
         budget_items = {
-            "Planning & Design": "15%",
-            "Construction": "60%",
-            "Equipment": "15%",
-            "Contingency": "10%"
+            'Planning & Design': '15%',
+            'Construction': '50%',
+            'Equipment & Materials': '20%',
+            'Contingency': '10%',
+            'Project Management': '5%'
         }
         
         for item, percent in budget_items.items():
-            st.markdown(f"**{item}:** {percent}")
-        
-        st.metric("Total Estimated Cost", "$25.4M", "+12% contingency")
-        
-        st.markdown("</div>", unsafe_allow_html=True)
-
-with tab5:
-    # Model Details
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-        st.markdown("### 🤖 AI Model Architecture")
-        
-        # Model performance visualization
-        fig = make_subplots(rows=1, cols=2, subplot_titles=("Model Accuracy", "Feature Importance"))
-        
-        # Accuracy bars
-        fig.add_trace(
-            go.Bar(x=['Training', 'Validation', 'Testing'], 
-                  y=[model_info['accuracy'], model_info['accuracy']*0.95, model_info['accuracy']*0.90],
-                  marker_color=['#667eea', '#764ba2', '#ff416c']),
-            row=1, col=1
-        )
-        
-        # Feature importance (simulated)
-        features = ['Population', 'Area', 'Urban Rate', 'GDP', 'Existing Infra']
-        importance = [0.35, 0.25, 0.15, 0.15, 0.10]
-        
-        fig.add_trace(
-            go.Bar(x=importance, y=features, orientation='h',
-                  marker_color='#667eea'),
-            row=1, col=2
-        )
-        
-        fig.update_layout(height=400, showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Model details
-        st.markdown("### 📊 Model Specifications")
-        
-        details = {
-            "Algorithm": "Random Forest Classifier",
-            "Ensemble Size": "200 Decision Trees",
-            "Max Depth": "15 Levels",
-            "Training Samples": f"{model_info['samples']:,}",
-            "Cross-validation": "5-Fold Stratified",
-            "Class Balance": "Weighted",
-            "Feature Engineering": "Automated Scaling",
-            "Hyperparameter Tuning": "Grid Search Optimized"
-        }
-        
-        for key, value in details.items():
-            st.markdown(f"**{key}:** {value}")
+            col_b1, col_b2 = st.columns([3, 1])
+            with col_b1:
+                st.markdown(f"**{item}**")
+            with col_b2:
+                st.markdown(f"**{percent}**")
         
         st.markdown("</div>", unsafe_allow_html=True)
     
-    with col2:
-        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-        st.markdown("### 📈 Performance Metrics")
+    else:
+        # Sufficient infrastructure
+        st.markdown("<div class='prediction-success'>", unsafe_allow_html=True)
+        st.markdown("## 🟢 MAINTENANCE & OPTIMIZATION PLAN")
+        st.markdown("**Status: Infrastructure Adequate**")
+        st.markdown("</div>", unsafe_allow_html=True)
         
-        metrics = [
-            ("Accuracy", f"{model_info['accuracy']*100:.2f}%", "#4CAF50"),
-            ("Precision", f"{model_info['accuracy']*100:.2f}%", "#2196F3"),
-            ("Recall", f"{model_info['accuracy']*100:.2f}%", "#FF9800"),
-            ("F1-Score", f"{model_info['accuracy']*100:.2f}%", "#9C27B0"),
-            ("ROC-AUC", f"{model_info['accuracy']*100:.2f}%", "#F44336")
+        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+        st.markdown("### 🔧 Maintenance Strategy")
+        
+        col_maint1, col_maint2 = st.columns(2)
+        
+        with col_maint1:
+            st.markdown("#### 🗓️ Quarterly Activities")
+            st.markdown("""
+            - Infrastructure health checks
+            - Performance metrics review
+            - Preventive maintenance
+            - Technology upgrades assessment
+            - Community feedback collection
+            """)
+        
+        with col_maint2:
+            st.markdown("#### 📊 Annual Review")
+            st.markdown("""
+            - Population growth analysis
+            - Capacity assessment
+            - Future requirements planning
+            - Budget allocation review
+            - Sustainability initiatives
+            """)
+        
+        st.markdown("### 🚀 Growth Readiness")
+        
+        readiness_items = [
+            "Land bank development for future expansion",
+            "Regulatory framework updates",
+            "Skill development programs",
+            "Innovation adoption roadmap",
+            "Public-private partnership opportunities"
         ]
         
-        for name, value, color in metrics:
-            st.markdown(f"<div style='background: {color}; color: white; padding: 10px; border-radius: 5px; margin: 5px 0;'>"
-                       f"<strong>{name}:</strong> {value}"
-                       f"</div>", unsafe_allow_html=True)
-        
-        st.markdown("### 🔍 Model Validation")
-        
-        # Confusion Matrix (simulated)
-        cm = np.array([[850, 50], [30, 920]])
-        
-        fig = px.imshow(cm,
-                       labels=dict(x="Predicted", y="Actual", color="Count"),
-                       x=['Sufficient', 'Needed'],
-                       y=['Sufficient', 'Needed'],
-                       color_continuous_scale='Blues',
-                       text_auto=True)
-        
-        fig.update_layout(height=250)
-        st.plotly_chart(fig, use_container_width=True)
+        for item in readiness_items:
+            st.markdown(f"✅ {item}")
         
         st.markdown("</div>", unsafe_allow_html=True)
 
-# ==================== FOOTER ====================
+# ==================== FOOTER & EXPORT ====================
 st.markdown("---")
 
-footer_col1, footer_col2, footer_col3 = st.columns(3)
+# Success Message
+st.success("""
+🎉 **Infrastructure Analysis Complete!** 
+Your AI-powered assessment is ready. Use the insights above for strategic planning.
+""")
 
-with footer_col1:
-    st.markdown("""
-    **InfraScope AI v3.0**  
-    Enterprise Infrastructure Intelligence Platform  
-    © 2024 All Rights Reserved
-    """)
+# Export Section
+st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+st.markdown("### 📤 Export & Share Results")
 
-with footer_col2:
-    st.markdown("""
-    **📞 Support**  
-    Email: support@infrascope.ai  
-    Phone: +1 (555) 123-4567
-    """)
+col_exp1, col_exp2, col_exp3 = st.columns(3)
 
-with footer_col3:
-    st.markdown("""
-    **🔗 Quick Links**  
-    [Documentation](https://docs.infrascope.ai) | 
-    [API](https://api.infrascope.ai) | 
-    [Case Studies](https://cases.infrascope.ai)
-    """)
-
-# ==================== ANALYTICS ====================
-if analyze_button:
-    st.toast("🎯 Deep analysis completed!", icon="✅")
-    st.balloons()
-    
-    # Generate report
-    report_data = {
-        "timestamp": str(datetime.now()),
-        "population": population,
-        "area": area,
-        "density": density,
-        "prediction": int(prediction),
-        "confidence": float(max(probabilities)),
-        "risk_level": "HIGH" if probabilities[1] > 0.7 else "MEDIUM" if probabilities[1] > 0.4 else "LOW",
-        "recommendation": "Immediate Development" if prediction == 1 else "Maintenance Focus"
+with col_exp1:
+    # JSON Export
+    export_data = {
+        "analysis_date": str(datetime.now()),
+        "parameters": {
+            "population": population,
+            "area": area,
+            "density": density
+        },
+        "prediction": {
+            "result": "Development Required" if prediction == 1 else "Infrastructure Sufficient",
+            "confidence": float(max(probabilities) * 100),
+            "probabilities": {
+                "sufficient": float(probabilities[0] * 100),
+                "development_needed": float(probabilities[1] * 100)
+            }
+        },
+        "metrics": {
+            "infrastructure_index": float(infra_index),
+            "development_urgency": float(development_urgency),
+            "capacity_utilization": float(capacity_utilization)
+        },
+        "model_info": {
+            "accuracy": float(model_info['accuracy'] * 100),
+            "samples": model_info['samples']
+        }
     }
     
-    # Download button for report
     st.download_button(
-        label="📥 Download Comprehensive Report",
-        data=json.dumps(report_data, indent=2),
-        file_name=f"infrascope_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+        label="📊 Download JSON Data",
+        data=json.dumps(export_data, indent=2),
+        file_name=f"infrastructure_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
         mime="application/json"
     )
+
+with col_exp2:
+    # Text Report
+    report_text = f"""
+    INFRASTRUCTURE INTELLIGENCE REPORT
+    ===================================
+    
+    Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+    
+    INPUT PARAMETERS
+    ----------------
+    Population: {population:,.0f} thousand
+    Area: {area:,.0f} sq km
+    Population Density: {density:.2f} people/sq km
+    
+    AI PREDICTION
+    -------------
+    Result: {"DEVELOPMENT REQUIRED" if prediction == 1 else "INFRASTRUCTURE SUFFICIENT"}
+    Confidence Level: {max(probabilities)*100:.1f}%
+    
+    Probability Breakdown:
+    - Sufficient Infrastructure: {probabilities[0]*100:.1f}%
+    - Development Needed: {probabilities[1]*100:.1f}%
+    
+    KEY METRICS
+    -----------
+    Infrastructure Index: {infra_index:.0f}/100
+    Development Urgency: {development_urgency:.0f}/100
+    Capacity Utilization: {capacity_utilization:.1f}%
+    
+    MODEL INFORMATION
+    -----------------
+    Model Accuracy: {model_info['accuracy']*100:.1f}%
+    Training Samples: {model_info['samples']:,}
+    
+    RECOMMENDATIONS
+    ---------------
+    Priority Level: {"CRITICAL" if prediction == 1 and probabilities[1] > 0.7 else "HIGH" if prediction == 1 else "LOW"}
+    Timeline: {"IMMEDIATE (0-3 months)" if prediction == 1 and probabilities[1] > 0.7 else "6-18 months" if prediction == 1 else "ONGOING"}
+    
+    ===================================
+    Generated by InfraScope AI v3.1
+    For planning and decision support
+    ===================================
+    """
+    
+    st.download_button(
+        label="📄 Download Text Report",
+        data=report_text,
+        file_name=f"infrastructure_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+        mime="text/plain"
+    )
+
+with col_exp3:
+    # Share options
+    st.markdown("### 🔗 Share Analysis")
+    
+    if st.button("📧 Email Report", use_container_width=True):
+        st.info("Email feature coming soon!")
+    
+    if st.button("💬 Request Consultation", use_container_width=True):
+        st.info("Consultation request sent!")
+
+st.markdown("</div>", unsafe_allow_html=True)
+
+# Final Footer
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center; color: #666; padding: 20px;'>
+    <p style='font-size: 1.1rem; font-weight: 600;'>🏗️ InfraScope AI | Enterprise Infrastructure Intelligence Platform</p>
+    <p style='font-size: 0.9rem;'>
+        Version 3.1.0 • Data Updated: {datetime.now().strftime('%Y-%m-%d')} • 
+        <a href='#' style='color: #4CAF50;'>Privacy Policy</a> • 
+        <a href='#' style='color: #4CAF50;'>Terms of Service</a>
+    </p>
+    <p style='font-size: 0.8rem; opacity: 0.7;'>
+        This tool provides AI-powered insights for planning purposes. 
+        Always consult with infrastructure experts for critical decisions.
+    </p>
+</div>
+""".format(datetime=datetime), unsafe_allow_html=True)
+
+# Celebration
+if st.button("🎉 Celebrate Success!"):
+    st.balloons()
+    st.success("🎊 Infrastructure analysis completed successfully!")
