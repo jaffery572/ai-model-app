@@ -594,7 +594,7 @@ def model_status_tab(model_kind: str, model_obj: object, feature_list: List[str]
         except Exception as e:
             st.error(f"Feature importance error: {e}")
 
-    st.caption("Tip: Streamlit Cloud pe joblib kabhi kabhi numpy/sklearn mismatch se fail hota hai — ONNX safest hai.")
+    
 
 
 # -----------------------------
