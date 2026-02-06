@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 import warnings
 import seaborn as sns
 import matplotlib.pyplot as plt
-import io
+
 warnings.filterwarnings('ignore')
 
 # Set page configuration
