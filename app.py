@@ -111,7 +111,7 @@ def load_onnx_model():
 @st.cache_data
 def load_default_country_data():
     """Fallback country dataset (small, safe)"""
-       data = {
+    data = {
         "Country": [
             "USA","CHN","IND","DEU","GBR","JPN","BRA","RUS","FRA","ITA","CAN","AUS","KOR","MEX","IDN",
             "TUR","SAU","CHE","NLD","ESP","PAK","BGD","NGA","EGY","VNM","THA","ZAF","ARG","COL","MYS"
