@@ -56,8 +56,12 @@ def fetch_country_snapshot(country_code: str) -> dict:
 def load_model():
     if not os.path.exists(MODEL_PATH):
         return None, FEATURES
-    payload = joblib.load(MODEL_PATH)
-    return payload.get("model"), payload.get("features", FEATURES)
+    try:
+        payload = joblib.load(MODEL_PATH)
+        return payload.get("model"), payload.get("features", FEATURES)
+    except Exception as e:
+        st.error(f"Model load failed: {e}")
+        return None, FEATURES
 
 def risk_badge(p):
     if p >= 70:
