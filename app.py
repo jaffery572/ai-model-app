@@ -10,8 +10,6 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="🌍 Global Infrastructure AI", page_icon="🌐", layout="wide")
 
 MODEL_PATH = "models/infra_model.joblib"
-
-# same features used in training script
 FEATURES = ["Population_Millions", "GDP_per_capita_USD", "HDI_Index", "Urbanization_Rate"]
 
 WB_INDICATORS = {
@@ -57,7 +55,7 @@ def fetch_country_snapshot(country_code: str) -> dict:
 @st.cache_resource
 def load_model():
     if not os.path.exists(MODEL_PATH):
-        return None, None
+        return None, FEATURES
     payload = joblib.load(MODEL_PATH)
     return payload.get("model"), payload.get("features", FEATURES)
 
@@ -69,72 +67,36 @@ def risk_badge(p):
     return "LOW", "🟢", "Maintain & optimize existing infrastructure."
 
 def main():
-    st.markdown("## 🌍 Global Infrastructure AI")
-    st.caption("World Bank indicators + trained ML model (local-trained). Streamlit Cloud compatible.")
+    st.title("🌍 Global Infrastructure AI")
+    st.caption("World Bank indicators + trained ML model. Streamlit Cloud compatible.")
 
     model, model_features = load_model()
     if model is None:
-        st.error("Model file missing. Upload: models/infra_model.joblib")
+        st.error("Model missing. Upload: models/infra_model.joblib")
         st.stop()
 
-    tab1, tab2 = st.tabs(["📊 Dashboard", "🤖 Predictor"])
+    tab1, tab2 = st.tabs(["🤖 Predictor", "📊 Explore CSV"])
 
     with tab1:
-        st.subheader("Quick Overview")
-        st.info("Tip: Use Predictor tab to fetch World Bank data + run inference.")
-
-        # Just a small explainability placeholder (Histogram of features distribution if CSV uploaded)
-        st.markdown("**Optional:** Upload a CSV (same columns) to explore distributions.")
-        up = st.file_uploader("Upload CSV", type=["csv"])
-        if up:
-            try:
-                df = pd.read_csv(up)
-                missing = [c for c in FEATURES if c not in df.columns]
-                if missing:
-                    st.error(f"CSV missing columns: {missing}")
-                else:
-                    st.dataframe(df.head(50), use_container_width=True)
-                    fig = px.histogram(df, x="GDP_per_capita_USD", nbins=50, title="GDP per Capita Distribution")
-                    st.plotly_chart(fig, use_container_width=True)
-            except Exception as e:
-                st.error(f"CSV read failed: {e}")
-
-    with tab2:
-        st.subheader("AI Predictor (Real Data Fetch + Manual Inputs)")
-
         colA, colB = st.columns([1.3, 1])
 
         with colA:
-            method = st.radio("Choose input method:", ["World Bank (country code)", "Manual input"], horizontal=True)
+            method = st.radio("Input method:", ["World Bank (country code)", "Manual"], horizontal=True)
 
             country_data = None
+            hdi = 0.70
 
             if method == "World Bank (country code)":
                 code = st.text_input("Country code (ISO2/ISO3) e.g., PK, IN, US", value="PK")
                 if st.button("Fetch Real Data"):
                     try:
                         snap = fetch_country_snapshot(code)
-                        if snap["GDP_per_capita_USD"] is None or snap["Population_Total"] is None:
-                            st.warning("Some indicators missing for this country code. Try ISO3 or another country.")
                         country_data = snap
-                        st.success("Fetched successfully (cached 1 hour).")
-
-                        st.write({
-                            "GDP_per_capita_USD": snap["GDP_per_capita_USD"],
-                            "Population_Total": snap["Population_Total"],
-                            "Urbanization_Rate": snap["Urbanization_Rate"],
-                            "Electricity_Access": snap["Electricity_Access"],
-                            "Years": {
-                                "gdp": snap["gdp_year"],
-                                "pop": snap["pop_year"],
-                                "urb": snap["urb_year"],
-                                "elec": snap["elec_year"],
-                            }
-                        })
+                        st.success("Fetched (cached 1 hour).")
+                        st.json(snap)
                     except Exception as e:
-                        st.error(f"World Bank fetch failed: {e}")
+                        st.error(f"Fetch failed: {e}")
 
-                # extra required feature not from WB: HDI (manual slider)
                 hdi = st.slider("HDI Index (manual)", 0.30, 0.99, 0.70, 0.01)
 
             else:
@@ -147,45 +109,35 @@ def main():
                     "Population_Total": pop_m * 1e6,
                     "GDP_per_capita_USD": gdp,
                     "Urbanization_Rate": urb,
-                    "Electricity_Access": None
                 }
 
-            if st.button("🚀 Predict Infrastructure Need", type="primary"):
-                try:
-                    if not country_data:
-                        st.warning("Please provide inputs first.")
-                        st.stop()
+            if st.button("🚀 Predict", type="primary"):
+                if not country_data:
+                    st.warning("Please provide inputs first.")
+                    st.stop()
 
-                    pop_total = country_data.get("Population_Total") or 0
-                    pop_m = pop_total / 1e6
+                pop_total = country_data.get("Population_Total") or 0
+                X = pd.DataFrame([{
+                    "Population_Millions": pop_total / 1e6,
+                    "GDP_per_capita_USD": float(country_data.get("GDP_per_capita_USD") or 0),
+                    "HDI_Index": float(hdi),
+                    "Urbanization_Rate": float(country_data.get("Urbanization_Rate") or 0),
+                }])[model_features]
 
-                    X = pd.DataFrame([{
-                        "Population_Millions": pop_m,
-                        "GDP_per_capita_USD": float(country_data.get("GDP_per_capita_USD") or 0),
-                        "HDI_Index": float(hdi),
-                        "Urbanization_Rate": float(country_data.get("Urbanization_Rate") or 0),
-                    }])
-
-                    X = X[model_features]
-                    proba = float(model.predict_proba(X.values)[0][1] * 100.0)
-
-                    st.session_state["last_pred"] = {"proba": proba, "X": X}
-
-                except Exception as e:
-                    st.error(f"Prediction failed: {e}")
+                proba = float(model.predict_proba(X.values)[0][1] * 100.0)
+                st.session_state["pred"] = {"proba": proba, "X": X}
 
         with colB:
-            st.markdown("### Result")
-            if "last_pred" in st.session_state:
-                proba = st.session_state["last_pred"]["proba"]
-                X = st.session_state["last_pred"]["X"]
+            st.subheader("Result")
+            if "pred" in st.session_state:
+                proba = st.session_state["pred"]["proba"]
+                X = st.session_state["pred"]["X"]
 
                 level, emoji, msg = risk_badge(proba)
                 st.metric("Need Probability", f"{proba:.1f}%")
                 st.write(f"**Risk:** {emoji} **{level}**")
                 st.write(msg)
 
-                # Gauge
                 fig = go.Figure(go.Indicator(
                     mode="gauge+number",
                     value=proba,
@@ -195,16 +147,22 @@ def main():
                 fig.update_layout(height=250)
                 st.plotly_chart(fig, use_container_width=True)
 
-                # Explainability (simple feature bars)
                 df_plot = X.T.reset_index()
                 df_plot.columns = ["feature", "value"]
-                fig2 = px.bar(df_plot, x="feature", y="value", title="Inputs used (feature values)")
-                st.plotly_chart(fig2, use_container_width=True)
+                st.plotly_chart(px.bar(df_plot, x="feature", y="value", title="Inputs used"), use_container_width=True)
             else:
-                st.info("Run a prediction to see results here.")
+                st.info("Run a prediction to see output.")
 
-    st.markdown("---")
-    st.caption("Deployed via GitHub → Streamlit Cloud. Model trained locally and uploaded as joblib.")
+    with tab2:
+        up = st.file_uploader("Upload CSV (optional)", type=["csv"])
+        if up:
+            try:
+                df = pd.read_csv(up)
+                st.dataframe(df.head(100), use_container_width=True)
+                if "GDP_per_capita_USD" in df.columns:
+                    st.plotly_chart(px.histogram(df, x="GDP_per_capita_USD", nbins=50), use_container_width=True)
+            except Exception as e:
+                st.error(f"CSV error: {e}")
 
 if __name__ == "__main__":
     main()
