@@ -395,9 +395,9 @@ def fetch_gdelt(query: str, max_records: int = 20) -> pd.DataFrame:
     if not query:
         return pd.DataFrame(columns=["title", "url", "sourceCountry", "seendate", "tone"])
 
-    # Keep it conservative to reduce 429
     max_records = int(clamp(max_records, 5, 50))
 
+    # Slightly safer parameters (less likely to return HTML)
     params = {
         "query": query,
         "mode": "ArtList",
@@ -412,12 +412,24 @@ def fetch_gdelt(query: str, max_records: int = 20) -> pd.DataFrame:
         GDELT_DOC_URL,
         params=params,
         timeout=20,
-        max_retries=3,
-        backoff_base=1.6,
+        max_retries=4,
+        backoff_base=1.8,
         allow_statuses=(200,),
     )
 
-    j = r.json()
+    # Guard: sometimes GDELT returns HTML or empty
+    txt = (r.text or "").strip()
+    if not txt:
+        raise RuntimeError("GDELT returned empty response.")
+    if txt[:1] != "{":
+        # Most common: HTML due to throttling / temporary block
+        raise RuntimeError(f"GDELT returned non-JSON (status={r.status_code}). Try again later.")
+
+    try:
+        j = r.json()
+    except Exception:
+        raise RuntimeError("GDELT JSON parse failed (non-JSON response). Try again later.")
+
     arts = (j.get("articles") or [])
     rows = []
     for a in arts:
@@ -439,14 +451,15 @@ def fetch_reliefweb(query: str, limit: int = 15) -> pd.DataFrame:
 
     limit = int(clamp(limit, 5, 50))
 
-    # ReliefWeb expects JSON body. This is a safe, commonly accepted structure.
+    # ReliefWeb API is strict: keep payload minimal + valid
     payload = {
         "query": {"value": query},
         "limit": limit,
-        "profile": "list",
         "sort": ["date:desc"],
-        # keep response lighter + more stable
-        "fields": {"include": ["title", "url", "date", "status", "type"]},
+        "profile": "list",
+        "fields": {
+            "include": ["title", "url", "date", "status", "type"]
+        },
     }
 
     r = http_request_with_retry(
@@ -454,34 +467,37 @@ def fetch_reliefweb(query: str, limit: int = 15) -> pd.DataFrame:
         RELIEFWEB_URL,
         json_body=payload,
         timeout=25,
-        max_retries=3,
-        backoff_base=1.6,
+        max_retries=4,
+        backoff_base=1.8,
         allow_statuses=(200,),
     )
 
     j = r.json()
     data = j.get("data") or []
+
     rows = []
     for item in data:
         fields = item.get("fields") or {}
-        types = fields.get("type") or []
-        if isinstance(types, list):
-            tnames = []
-            for t in types:
-                if isinstance(t, dict) and t.get("name"):
-                    tnames.append(t.get("name"))
-            type_str = ", ".join(tnames)
+
+        type_list = fields.get("type") or []
+        if isinstance(type_list, list):
+            type_str = ", ".join([t.get("name") for t in type_list if isinstance(t, dict) and t.get("name")])
         else:
-            type_str = str(types)
+            type_str = ""
+
+        date_obj = fields.get("date") or {}
+        date_created = date_obj.get("created") if isinstance(date_obj, dict) else None
 
         rows.append({
             "title": fields.get("title"),
             "url": fields.get("url") or "",
-            "date": (fields.get("date") or {}).get("created") if isinstance(fields.get("date"), dict) else None,
+            "date": date_created,
             "status": fields.get("status"),
             "type": type_str,
         })
+
     return pd.DataFrame(rows)
+
 
 
 def disaster_overlay_score(gdelt_df: pd.DataFrame, relief_df: pd.DataFrame) -> float:
