@@ -111,7 +111,33 @@ def load_onnx_model():
 @st.cache_data
 def load_default_country_data():
     """Fallback country dataset (small, safe)"""
-    data = {
-        "Country": ["USA","CHN","IND","DEU","GBR","JPN","BRA","RUS","FRA","ITA","CAN","AUS","KOR","MEX","IDN",
-                    "TUR","SAU","CHE","NLD","ESP","PAK","BGD","NGA","EGY","VNM","THA","ZAF","ARG","COL","MYS"],
-        "Population_Millions": [331,1412,1408,83,68,125,215,144,67,59,38,26,51,129,278,85,36,8.6,17,47,240]()_
+       data = {
+        "Country": [
+            "USA","CHN","IND","DEU","GBR","JPN","BRA","RUS","FRA","ITA","CAN","AUS","KOR","MEX","IDN",
+            "TUR","SAU","CHE","NLD","ESP","PAK","BGD","NGA","EGY","VNM","THA","ZAF","ARG","COL","MYS"
+        ],
+        "Population_Millions": [
+            331,1412,1408,83,68,125,215,144,67,59,38,26,51,129,278,85,36,8.6,17,47,
+            240,170,216,109,98,70,60,45,52,33
+        ],
+        "GDP_per_capita_USD": [
+            63500,12500,2300,45700,42200,40100,8900,11200,40400,32000,43200,52000,35000,9900,4300,
+            9500,23500,81900,52400,29400,1500,2600,2300,3900,2800,7800,6300,10600,6400,11400
+        ],
+        "HDI_Index": [
+            0.926,0.761,0.645,0.947,0.932,0.925,0.765,0.824,0.901,0.892,0.929,0.944,0.916,0.779,
+            0.718,0.820,0.857,0.955,0.944,0.904,0.557,0.632,0.539,0.707,0.704,0.777,0.709,0.845,
+            0.767,0.803
+        ],
+        "Urbanization_Rate": [
+            83,64,35,77,84,92,87,75,81,71,81,86,81,81,57,76,84,74,93,81,
+            37,39,52,43,38,51,68,92,81,78
+        ],
+        "Continent": [
+            "North America","Asia","Asia","Europe","Europe","Asia","South America","Europe","Europe","Europe",
+            "North America","Oceania","Asia","North America","Asia","Asia","Asia","Europe","Europe","Europe",
+            "Asia","Asia","Africa","Africa","Asia","Asia","Africa","South America","South America","Asia"
+        ],
+    }
+
+    df = pd.DataFrame(data)
