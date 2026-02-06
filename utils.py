@@ -1,15 +1,13 @@
 import os
 import time
 import math
-from datetime import datetime
-from typing import Dict, Any, Tuple, List, Optional
+from typing import Dict, Any, Tuple, Optional, List
 
 import numpy as np
 import pandas as pd
 import requests
-import streamlit as st
 
-# ONNX (Cloud-safe)
+# Optional ONNX (Cloud-safe)
 try:
     import onnxruntime as ort
 except Exception:
@@ -22,9 +20,6 @@ except Exception:
     joblib = None
 
 
-# -----------------------------
-# Constants
-# -----------------------------
 FEATURES = ["Population_Millions", "GDP_per_capita_USD", "HDI_Index", "Urbanization_Rate"]
 
 MODEL_ONNX_PATH = os.path.join("models", "infra_model.onnx")
@@ -38,25 +33,28 @@ OVERPASS_ENDPOINTS = [
     "https://overpass.openstreetmap.ru/api/interpreter",
 ]
 
-# FREE news/disaster sources
+# Feeds (free)
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 RELIEFWEB_URL = "https://api.reliefweb.int/v1/reports"
 
-DEFAULT_RADIUS_M = 5000
+# New FREE feeds
+USGS_EQ_URL = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson"
+EONET_EVENTS_URL = "https://eonet.gsfc.nasa.gov/api/v3/events"
+OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
 
 # -----------------------------
-# Small helpers
+# Generic helpers
 # -----------------------------
+def clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
 def safe_float(x, default=np.nan) -> float:
     try:
         return float(x)
     except Exception:
         return default
-
-
-def clamp(v: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, v))
 
 
 def risk_bucket(score_0_100: float) -> Tuple[str, str]:
@@ -79,83 +77,103 @@ def to_feature_row(d: Dict[str, Any]) -> np.ndarray:
     return np.array(row, dtype=np.float32).reshape(1, -1)
 
 
-def build_default_country_df() -> pd.DataFrame:
-    data = {
-        "Country": [
-            "USA", "CHN", "IND", "DEU", "GBR", "JPN", "BRA", "RUS", "FRA", "ITA",
-            "CAN", "AUS", "KOR", "MEX", "IDN", "TUR", "SAU", "CHE", "NLD", "ESP",
-            "PAK", "BGD", "NGA", "EGY", "VNM", "THA", "ZAF", "ARG", "COL", "MYS",
-        ],
-        "Population_Millions": [
-            331, 1412, 1408, 83, 68, 125, 215, 144, 67, 59,
-            38, 26, 51, 129, 278, 85, 36, 8.6, 17, 47,
-            240, 170, 216, 109, 98, 70, 60, 45, 52, 33
-        ],
-        "GDP_per_capita_USD": [
-            63500, 12500, 2300, 45700, 42200, 40100, 8900, 11200, 40400, 32000,
-            43200, 52000, 35000, 9900, 4300, 9500, 23500, 81900, 52400, 29400,
-            1500, 2600, 2300, 3900, 2800, 7800, 6300, 10600, 6400, 11400
-        ],
-        "HDI_Index": [
-            0.926, 0.761, 0.645, 0.947, 0.932, 0.925, 0.765, 0.824, 0.901, 0.892,
-            0.929, 0.944, 0.916, 0.779, 0.718, 0.820, 0.857, 0.955, 0.944, 0.904,
-            0.557, 0.632, 0.539, 0.707, 0.704, 0.777, 0.709, 0.845, 0.767, 0.803
-        ],
-        "Urbanization_Rate": [
-            83, 64, 35, 77, 84, 92, 87, 75, 81, 71,
-            81, 86, 81, 81, 57, 76, 84, 74, 93, 81,
-            37, 39, 52, 43, 38, 51, 68, 92, 81, 78
-        ],
-    }
-    return pd.DataFrame(data)
+# -----------------------------
+# Retry / backoff network layer
+# -----------------------------
+def _sleep_backoff(attempt: int, base: float = 0.8, cap: float = 8.0) -> None:
+    t = min(cap, base * (2 ** attempt))
+    time.sleep(t)
 
 
-def sample_csv_bytes() -> bytes:
-    df = pd.DataFrame(
-        [
-            {"Population_Millions": 50, "GDP_per_capita_USD": 5000, "HDI_Index": 0.70, "Urbanization_Rate": 50},
-            {"Population_Millions": 120, "GDP_per_capita_USD": 2200, "HDI_Index": 0.62, "Urbanization_Rate": 40},
-        ]
-    )
-    return df.to_csv(index=False).encode("utf-8")
+def request_json(
+    method: str,
+    url: str,
+    *,
+    params: Optional[dict] = None,
+    json_body: Optional[dict] = None,
+    data: Optional[bytes] = None,
+    headers: Optional[dict] = None,
+    timeout: int = 20,
+    max_retries: int = 3,
+) -> Tuple[Optional[dict], Optional[str], Optional[int]]:
+    """
+    Returns: (json_dict_or_none, error_message_or_none, status_code_or_none)
+    Safe: never throws.
+    """
+    headers = headers or {}
+    headers.setdefault("User-Agent", "GlobalInfrastructureAI/1.0 (streamlit)")
 
+    for attempt in range(max_retries):
+        try:
+            r = requests.request(
+                method,
+                url,
+                params=params,
+                json=json_body,
+                data=data,
+                headers=headers,
+                timeout=timeout,
+            )
+            code = r.status_code
 
-def _safe_json(resp: requests.Response) -> Optional[dict]:
-    try:
-        txt = (resp.text or "").strip()
-        if not txt:
-            return None
-        if txt.startswith("<!DOCTYPE html") or txt.startswith("<html"):
-            return None
-        return resp.json()
-    except Exception:
-        return None
+            # Handle rate limiting / temporary failures with retry
+            if code in (429, 500, 502, 503, 504):
+                if attempt < max_retries - 1:
+                    _sleep_backoff(attempt)
+                    continue
+                return None, f"{code} error from provider (rate-limited or temporary).", code
+
+            if code >= 400:
+                snippet = (r.text or "")[:400]
+                return None, f"{code} error: {snippet}", code
+
+            try:
+                return r.json(), None, code
+            except Exception:
+                return None, "Response was not valid JSON.", code
+
+        except Exception as e:
+            if attempt < max_retries - 1:
+                _sleep_backoff(attempt)
+                continue
+            return None, f"Network error: {e}", None
+
+    return None, "Unknown error.", None
 
 
 # -----------------------------
 # Model loading / prediction
 # -----------------------------
-@st.cache_resource(show_spinner=False)
+_onnx_sess_cache: Dict[str, Any] = {}
+_joblib_cache: Dict[str, Any] = {}
+
+
 def load_onnx_session(path: str):
     if ort is None:
         return None
     if not os.path.exists(path):
         return None
+    if path in _onnx_sess_cache:
+        return _onnx_sess_cache[path]
     try:
         sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+        _onnx_sess_cache[path] = sess
         return sess
     except Exception:
         return None
 
 
-@st.cache_resource(show_spinner=False)
 def load_joblib_model(path: str):
     if joblib is None:
         return None
     if not os.path.exists(path):
         return None
+    if path in _joblib_cache:
+        return _joblib_cache[path]
     try:
-        return joblib.load(path)
+        mdl = joblib.load(path)
+        _joblib_cache[path] = mdl
+        return mdl
     except Exception:
         return None
 
@@ -175,8 +193,10 @@ def heuristic_need_score(country_data: Dict[str, float]) -> float:
     return clamp(score, 0, 100)
 
 
-def model_predict_proba(features_row: np.ndarray) -> Tuple[float, str]:
-    # ONNX first
+def model_predict_need(features_row: np.ndarray) -> Tuple[float, str]:
+    """
+    Returns (need_0_100, model_kind). Never throws.
+    """
     sess = load_onnx_session(MODEL_ONNX_PATH)
     if sess is not None:
         try:
@@ -194,7 +214,6 @@ def model_predict_proba(features_row: np.ndarray) -> Tuple[float, str]:
         except Exception:
             pass
 
-    # joblib fallback
     mdl = load_joblib_model(MODEL_JOBLIB_PATH)
     if mdl is not None:
         try:
@@ -206,7 +225,6 @@ def model_predict_proba(features_row: np.ndarray) -> Tuple[float, str]:
         except Exception:
             pass
 
-    # heuristic always works
     d = {
         "Population_Millions": float(features_row[0, 0]),
         "GDP_per_capita_USD": float(features_row[0, 1]),
@@ -217,13 +235,13 @@ def model_predict_proba(features_row: np.ndarray) -> Tuple[float, str]:
 
 
 # -----------------------------
-# Overpass signals (robust)
+# Overpass signals (multi-endpoint)
 # -----------------------------
 def overpass_query(lat: float, lon: float, radius_m: int) -> str:
     return f"""
 [out:json][timeout:25];
 (
-  way(around:{radius_m},{lat},{lon})["highway"];
+  way(around:{radius_m},{lat},{lon})["highway"]["highway"~"motorway|trunk|primary|secondary|tertiary|residential"];
   node(around:{radius_m},{lat},{lon})["amenity"="hospital"];
   node(around:{radius_m},{lat},{lon})["amenity"="school"];
   node(around:{radius_m},{lat},{lon})["amenity"="clinic"];
@@ -232,10 +250,10 @@ def overpass_query(lat: float, lon: float, radius_m: int) -> str:
   node(around:{radius_m},{lat},{lon})["emergency"];
 );
 out body;
-""".strip()
+"""
 
 
-def _parse_overpass_signals(data: Dict[str, Any], radius_m: int) -> Dict[str, Any]:
+def parse_overpass_signals(data: dict) -> Dict[str, Any]:
     elements = data.get("elements", []) or []
     signals = {
         "roads": 0,
@@ -245,9 +263,8 @@ def _parse_overpass_signals(data: Dict[str, Any], radius_m: int) -> Dict[str, An
         "power": 0,
         "water": 0,
         "emergency": 0,
-        "radius_m": radius_m,
-        "elements": len(elements),
     }
+
     for el in elements:
         tags = el.get("tags", {}) or {}
         if "highway" in tags:
@@ -264,160 +281,127 @@ def _parse_overpass_signals(data: Dict[str, Any], radius_m: int) -> Dict[str, An
             signals["water"] += 1
         if "emergency" in tags:
             signals["emergency"] += 1
+
+    signals["roads"] = int(min(signals["roads"], 10000))
     return signals
 
 
-@st.cache_data(ttl=60 * 10, show_spinner=False)
-def fetch_overpass_signals_robust(lat: float, lon: float, radius_m: int) -> Dict[str, Any]:
-    headers = {"Content-Type": "text/plain; charset=utf-8"}
+def fetch_overpass_signals(lat: float, lon: float, radius_m: int) -> Tuple[Optional[Dict[str, Any]], str, Optional[str]]:
+    q = overpass_query(lat, lon, radius_m).encode("utf-8")
 
-    radii_try = [int(radius_m)]
-    if radius_m > 3500:
-        radii_try.append(3500)
-    if radius_m > 2000:
-        radii_try.append(2000)
-    if radius_m > 1200:
-        radii_try.append(1200)
+    for endpoint in OVERPASS_ENDPOINTS:
+        j, err, code = request_json(
+            "POST",
+            endpoint,
+            data=q,
+            headers={"Content-Type": "text/plain"},
+            timeout=25,
+            max_retries=2,
+        )
+        if j is not None:
+            sig = parse_overpass_signals(j)
+            sig["radius_m"] = int(radius_m)
+            return sig, "Signals loaded.", endpoint
 
-    last_err = None
-
-    for r_m in radii_try:
-        q = overpass_query(lat, lon, r_m)
-        for endpoint in OVERPASS_ENDPOINTS:
-            for attempt in range(3):
-                try:
-                    resp = requests.post(
-                        endpoint,
-                        data=q.encode("utf-8"),
-                        headers=headers,
-                        timeout=(10, 35),
-                    )
-
-                    if resp.status_code == 429:
-                        raise RuntimeError("Rate limited (429)")
-                    if resp.status_code >= 500:
-                        raise RuntimeError(f"Server error {resp.status_code}")
-
-                    resp.raise_for_status()
-                    text = (resp.text or "").strip()
-
-                    if (not text) or text.startswith("<!DOCTYPE html") or "Your input contains only whitespace" in text:
-                        raise RuntimeError("Non-JSON/empty response from endpoint")
-
-                    data = resp.json()
-                    signals = _parse_overpass_signals(data, r_m)
-                    signals["endpoint_used"] = endpoint
-                    signals["attempt"] = attempt + 1
-                    return signals
-
-                except Exception as e:
-                    last_err = f"{endpoint} radius {r_m} attempt {attempt + 1}: {e}"
-                    time.sleep(1.0 * (2 ** attempt))
-
-    raise RuntimeError(f"Overpass failed after fallbacks. Last error: {last_err}")
+    return None, "Overpass unavailable right now. Try again in a minute.", None
 
 
 def map_context_adjustment(signals: Dict[str, Any]) -> float:
-    roads = int(signals.get("roads", 0))
-    key_pois = (
-        int(signals.get("hospitals", 0))
-        + int(signals.get("schools", 0))
-        + int(signals.get("clinics", 0))
-        + int(signals.get("power", 0))
-        + int(signals.get("water", 0))
+    roads = float(signals.get("roads", 0))
+    key_pois = float(
+        signals.get("hospitals", 0)
+        + signals.get("schools", 0)
+        + signals.get("clinics", 0)
+        + signals.get("power", 0)
+        + signals.get("water", 0)
     )
-    infra_density = (min(roads, 200) / 200.0) * 0.6 + (min(key_pois, 40) / 40.0) * 0.4
+
+    infra_density = (min(roads, 2000) / 2000.0) * 0.6 + (min(key_pois, 80) / 80.0) * 0.4
     adj = (0.35 - infra_density) * 45.0
     return clamp(adj, -10.0, 15.0)
 
 
 # -----------------------------
-# Live feeds (robust)
+# News / disaster feeds (safe)
 # -----------------------------
-@st.cache_data(ttl=60 * 15, show_spinner=False)
-def fetch_gdelt(query: str, max_records: int = 20) -> pd.DataFrame:
-    query = (query or "").strip()
-    if not query:
-        return pd.DataFrame(columns=["title", "url", "sourceCountry", "seendate", "tone"])
-
+def fetch_gdelt(query: str, max_records: int = 20) -> Tuple[pd.DataFrame, Optional[str]]:
     params = {
         "query": query,
         "mode": "ArtList",
         "format": "json",
-        "maxrecords": int(clamp(max_records, 5, 30)),
+        "maxrecords": int(max_records),
         "formatdatetime": "true",
         "sort": "HybridRel",
     }
 
-    r = requests.get(GDELT_DOC_URL, params=params, timeout=25)
-    if r.status_code == 429:
-        raise RuntimeError("GDELT rate limited (429). Try again in ~1 minute.")
-    if r.status_code >= 500:
-        raise RuntimeError(f"GDELT server error ({r.status_code}). Try later.")
-    r.raise_for_status()
+    j, err, code = request_json("GET", GDELT_DOC_URL, params=params, timeout=20, max_retries=3)
+    if j is None:
+        if code == 429:
+            return pd.DataFrame(), "GDELT rate-limited (429). Try again in ~1 minute."
+        return pd.DataFrame(), f"GDELT unavailable: {err or 'unknown error'}"
 
-    j = _safe_json(r)
-    if not j:
-        raise RuntimeError("GDELT returned invalid/empty response.")
+    arts = (j.get("articles") or [])
+    if not arts:
+        return pd.DataFrame(columns=["title", "url", "sourceCountry", "seendate", "tone"]), None
 
-    arts = j.get("articles") or []
     rows = []
     for a in arts:
-        rows.append(
-            {
-                "title": a.get("title"),
-                "url": a.get("url"),
-                "sourceCountry": a.get("sourceCountry"),
-                "seendate": a.get("seendate"),
-                "tone": a.get("tone"),
-            }
-        )
-    return pd.DataFrame(rows)
+        rows.append({
+            "title": a.get("title"),
+            "url": a.get("url"),
+            "sourceCountry": a.get("sourceCountry"),
+            "seendate": a.get("seendate"),
+            "tone": a.get("tone"),
+        })
+    return pd.DataFrame(rows), None
 
 
-@st.cache_data(ttl=60 * 30, show_spinner=False)
-def fetch_reliefweb(query: str, limit: int = 15) -> pd.DataFrame:
-    query = (query or "").strip()
-    if not query:
-        return pd.DataFrame(columns=["title", "url", "date", "source"])
-
+def fetch_reliefweb(query: str, limit: int = 15) -> Tuple[pd.DataFrame, Optional[str]]:
     payload = {
-        "appname": "global-infra-ai",
-        "query": {"value": str(query)},
-        "limit": int(clamp(limit, 5, 30)),
-        "profile": "list",
+        "appname": "global-infrastructure-ai",
+        "query": {"value": query},
+        "limit": int(limit),
+        "profile": "lite",
         "sort": ["date:desc"],
     }
 
-    r = requests.post(RELIEFWEB_URL, json=payload, timeout=30)
-    if r.status_code >= 500:
-        raise RuntimeError(f"ReliefWeb server error ({r.status_code}).")
-    r.raise_for_status()
-
-    j = _safe_json(r)
-    if not j:
-        raise RuntimeError("ReliefWeb returned invalid/empty response.")
+    j, err, code = request_json(
+        "POST",
+        RELIEFWEB_URL,
+        json_body=payload,
+        headers={"Content-Type": "application/json"},
+        timeout=25,
+        max_retries=2,
+    )
+    if j is None:
+        if code == 400:
+            return pd.DataFrame(), "ReliefWeb rejected the query (400). Try simpler keywords."
+        return pd.DataFrame(), f"ReliefWeb unavailable: {err or 'unknown error'}"
 
     data = j.get("data") or []
     rows = []
     for item in data:
         fields = item.get("fields") or {}
-        rows.append(
-            {
-                "title": fields.get("title"),
-                "url": fields.get("url") or "",
-                "date": (fields.get("date") or {}).get("created"),
-                "source": ", ".join([s.get("name") for s in (fields.get("source") or []) if isinstance(s, dict)])[:120],
-            }
-        )
-    return pd.DataFrame(rows)
+        rows.append({
+            "title": fields.get("title"),
+            "url": fields.get("url") or "",
+            "date": (fields.get("date") or {}).get("created"),
+            "status": fields.get("status"),
+            "type": ", ".join([t.get("name") for t in (fields.get("type") or []) if isinstance(t, dict)]),
+        })
+
+    if not rows:
+        return pd.DataFrame(columns=["title", "url", "date", "status", "type"]), None
+
+    return pd.DataFrame(rows), None
 
 
 def disaster_overlay_score(gdelt_df: pd.DataFrame, relief_df: pd.DataFrame) -> float:
     score = 0.0
+
     if isinstance(gdelt_df, pd.DataFrame) and not gdelt_df.empty:
         score += min(len(gdelt_df), 20) * 0.3
-        tones = pd.to_numeric(gdelt_df.get("tone", pd.Series(dtype=float)), errors="coerce").dropna()
+        tones = pd.to_numeric(gdelt_df.get("tone", pd.Series([], dtype=float)), errors="coerce").dropna()
         if len(tones) > 0:
             avg_tone = float(tones.mean())
             if avg_tone < -2:
@@ -432,101 +416,356 @@ def disaster_overlay_score(gdelt_df: pd.DataFrame, relief_df: pd.DataFrame) -> f
 
 
 # -----------------------------
-# Guidance / Analyst
+# NEW: USGS earthquakes (free)
 # -----------------------------
-def recommendations(need: float, overlay: float) -> List[str]:
-    total = clamp(need + overlay, 0, 100)
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    R = 6371.0
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2) + math.cos(p1) * math.cos(p2) * (math.sin(dlon / 2) ** 2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
+
+
+def fetch_usgs_earthquakes_near(lat: float, lon: float, radius_km: float = 300.0) -> Tuple[pd.DataFrame, Optional[str]]:
+    j, err, code = request_json("GET", USGS_EQ_URL, timeout=20, max_retries=3)
+    if j is None:
+        return pd.DataFrame(), f"USGS unavailable: {err or code}"
+
+    feats = j.get("features") or []
+    rows = []
+    for f in feats:
+        props = f.get("properties") or {}
+        geom = f.get("geometry") or {}
+        coords = geom.get("coordinates") or []
+        if len(coords) < 2:
+            continue
+        eq_lon, eq_lat = float(coords[0]), float(coords[1])
+        dist = haversine_km(lat, lon, eq_lat, eq_lon)
+        if dist <= radius_km:
+            mag = props.get("mag")
+            rows.append({
+                "time": props.get("time"),
+                "place": props.get("place"),
+                "mag": mag,
+                "url": props.get("url"),
+                "distance_km": dist,
+            })
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["distance_km"] = df["distance_km"].round(1)
+        df = df.sort_values(["mag", "distance_km"], ascending=[False, True]).head(30)
+    return df, None
+
+
+def usgs_overlay_points(eq_df: pd.DataFrame) -> float:
+    """
+    0..8 overlay points based on nearby quakes (last day feed).
+    """
+    if eq_df is None or not isinstance(eq_df, pd.DataFrame) or eq_df.empty:
+        return 0.0
+
+    # weigh by magnitude
+    mags = pd.to_numeric(eq_df.get("mag", pd.Series([], dtype=float)), errors="coerce").dropna()
+    if mags.empty:
+        return min(2.0, len(eq_df) * 0.2)
+
+    max_mag = float(mags.max())
+    count = float(len(eq_df))
+
+    pts = 0.0
+    pts += min(3.0, count * 0.25)
+    if max_mag >= 6.0:
+        pts += 5.0
+    elif max_mag >= 5.0:
+        pts += 3.0
+    elif max_mag >= 4.0:
+        pts += 1.5
+
+    return clamp(pts, 0.0, 8.0)
+
+
+# -----------------------------
+# NEW: Open-Meteo (free)
+# -----------------------------
+def fetch_open_meteo(lat: float, lon: float) -> Tuple[Optional[dict], Optional[str]]:
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "daily": "precipitation_sum,wind_speed_10m_max,temperature_2m_max,temperature_2m_min",
+        "timezone": "UTC",
+        "forecast_days": 3,
+    }
+    j, err, code = request_json("GET", OPEN_METEO_URL, params=params, timeout=20, max_retries=3)
+    if j is None:
+        return None, f"Open-Meteo unavailable: {err or code}"
+    return j, None
+
+
+def open_meteo_overlay_points(meteo_json: Optional[dict]) -> Tuple[float, Dict[str, Any]]:
+    """
+    0..6 overlay points from heavy rain / strong wind heuristic.
+    Also returns a small summary dict.
+    """
+    if not meteo_json:
+        return 0.0, {}
+
+    daily = meteo_json.get("daily") or {}
+    dates = daily.get("time") or []
+    rain = daily.get("precipitation_sum") or []
+    wind = daily.get("wind_speed_10m_max") or []
+    tmax = daily.get("temperature_2m_max") or []
+    tmin = daily.get("temperature_2m_min") or []
+
+    if not dates:
+        return 0.0, {}
+
+    def _safe_idx(arr, i):
+        try:
+            return float(arr[i])
+        except Exception:
+            return float("nan")
+
+    # use day0 as near-term
+    rain0 = _safe_idx(rain, 0)
+    wind0 = _safe_idx(wind, 0)
+
+    pts = 0.0
+    # Rain thresholds (mm/day)
+    if not math.isnan(rain0):
+        if rain0 >= 50:
+            pts += 4.0
+        elif rain0 >= 25:
+            pts += 2.5
+        elif rain0 >= 10:
+            pts += 1.0
+
+    # Wind thresholds (km/h equivalent depends on unit; Open-Meteo wind_speed_10m_max is usually km/h)
+    if not math.isnan(wind0):
+        if wind0 >= 70:
+            pts += 3.0
+        elif wind0 >= 50:
+            pts += 2.0
+        elif wind0 >= 35:
+            pts += 1.0
+
+    pts = clamp(pts, 0.0, 6.0)
+
+    summary = {
+        "date_utc": dates[0] if dates else None,
+        "precipitation_sum_mm": rain0,
+        "wind_speed_10m_max": wind0,
+        "tmax": _safe_idx(tmax, 0),
+        "tmin": _safe_idx(tmin, 0),
+    }
+    return pts, summary
+
+
+# -----------------------------
+# NEW: NASA EONET (free)
+# -----------------------------
+def fetch_eonet_events_near(lat: float, lon: float, radius_km: float = 500.0, limit: int = 30) -> Tuple[pd.DataFrame, Optional[str]]:
+    # EONET supports filters; we will fetch open events with limit, then filter by distance
+    params = {
+        "status": "open",
+        "limit": int(limit),
+    }
+    j, err, code = request_json("GET", EONET_EVENTS_URL, params=params, timeout=20, max_retries=3)
+    if j is None:
+        return pd.DataFrame(), f"EONET unavailable: {err or code}"
+
+    events = j.get("events") or []
+    rows = []
+
+    for ev in events:
+        title = ev.get("title")
+        link = ev.get("link")
+        categories = ev.get("categories") or []
+        cat_names = ", ".join([c.get("title") for c in categories if isinstance(c, dict)])
+
+        geoms = ev.get("geometry") or []
+        # find any geometry point close
+        best_dist = None
+        best_lat = None
+        best_lon = None
+        best_date = None
+
+        for g in geoms:
+            gtype = g.get("type")
+            coords = g.get("coordinates")
+            gdate = g.get("date")
+            if gtype == "Point" and isinstance(coords, list) and len(coords) >= 2:
+                glon, glat = float(coords[0]), float(coords[1])
+                dist = haversine_km(lat, lon, glat, glon)
+                if best_dist is None or dist < best_dist:
+                    best_dist = dist
+                    best_lat, best_lon = glat, glon
+                    best_date = gdate
+
+        if best_dist is not None and best_dist <= radius_km:
+            rows.append({
+                "title": title,
+                "categories": cat_names,
+                "date": best_date,
+                "url": link,
+                "distance_km": round(best_dist, 1),
+                "lat": best_lat,
+                "lon": best_lon,
+            })
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values("distance_km", ascending=True).head(30)
+    return df, None
+
+
+def eonet_overlay_points(eo_df: pd.DataFrame) -> float:
+    """
+    0..6 overlay points based on number + category rough weighting.
+    """
+    if eo_df is None or not isinstance(eo_df, pd.DataFrame) or eo_df.empty:
+        return 0.0
+
+    pts = min(3.0, len(eo_df) * 0.4)
+
+    cats = " ".join([str(x).lower() for x in eo_df.get("categories", [])])
+    # rough category boosts
+    if "wildfire" in cats:
+        pts += 1.5
+    if "severe storms" in cats or "storm" in cats:
+        pts += 1.0
+    if "volcano" in cats:
+        pts += 1.5
+    if "flood" in cats:
+        pts += 1.0
+
+    return clamp(pts, 0.0, 6.0)
+
+
+# -----------------------------
+# Recommendations + report
+# -----------------------------
+def recommendations(need: float, overlay_points: float) -> List[str]:
+    total = clamp(need + overlay_points, 0, 100)
+
     if total >= 70:
         return [
-            "Prioritize critical infrastructure assessment (roads, power, water, healthcare).",
-            "Create an emergency maintenance plan with response timelines and accountable owners.",
-            "Strengthen flood drainage, slope stability, and backup power readiness.",
-            "Run rapid vulnerability audits for bridges, hospitals, and substations.",
-            "Pre-position resources for fast repairs: fuel, pumps, generators, spare parts.",
+            "Prioritize rapid assessment of roads, power, water, and healthcare capacity.",
+            "Activate emergency maintenance plan with defined response times and contractors.",
+            "Review drainage, slope stability, and backup power readiness immediately.",
+            "Run vulnerability audits for bridges, substations, and critical facilities.",
+            "Prepare contingency logistics for fuel, water, and medical access under disruption.",
         ]
     if total >= 40:
         return [
-            "Plan targeted upgrades in transport, utilities, and public services.",
-            "Focus on resilience improvements (redundancy, maintenance cycles, inspections).",
-            "Improve asset inventory and preventive maintenance to reduce failures.",
-            "Track hazard alerts and prioritize at-risk assets for inspection.",
+            "Plan targeted upgrades for transport corridors and utility reliability.",
+            "Improve resilience through redundancy, inspections, and preventive maintenance cycles.",
+            "Identify highest-risk assets and create a prioritized rehabilitation backlog.",
+            "Monitor hazard signals and define trigger-based response actions.",
         ]
     return [
         "Maintain assets with preventive maintenance and routine inspections.",
-        "Improve monitoring (basic reporting, asset inventory, maintenance logging).",
-        "Review extreme weather preparedness (drainage, backups, response plans).",
+        "Build an asset inventory and basic condition scoring for critical infrastructure.",
+        "Add low-cost monitoring (checklists, reporting, scheduled inspections).",
+        "Review extreme weather preparedness and update response procedures.",
     ]
 
 
-def build_analyst_context(session_state: dict) -> Dict[str, Any]:
-    ctx = {
-        "base_need": None,
-        "model_kind": None,
-        "map_adjustment": float(session_state.get("map_adjustment", 0.0)),
-        "news_overlay": float(session_state.get("news_overlay", 0.0)),
-        "combined_need": None,
-        "signals": session_state.get("map_signals"),
-        "gdelt_rows": int(len(session_state.get("gdelt_df", pd.DataFrame()))) if isinstance(session_state.get("gdelt_df"), pd.DataFrame) else 0,
-        "relief_rows": int(len(session_state.get("relief_df", pd.DataFrame()))) if isinstance(session_state.get("relief_df"), pd.DataFrame) else 0,
-    }
-    if "single_pred" in session_state:
-        ctx["base_need"] = float(session_state["single_pred"]["need"])
-        ctx["model_kind"] = session_state["single_pred"]["model_kind"]
-        ctx["combined_need"] = clamp(ctx["base_need"] + ctx["map_adjustment"] + ctx["news_overlay"], 0, 100)
-    return ctx
+def build_report_markdown(
+    *,
+    country_label: Optional[str],
+    inputs: Dict[str, Any],
+    base_need: float,
+    model_kind: str,
+    map_adj: float,
+    news_overlay: float,
+    usgs_pts: float,
+    meteo_pts: float,
+    eonet_pts: float,
+    map_signals: Optional[Dict[str, Any]],
+    gdelt_df: Optional[pd.DataFrame],
+    relief_df: Optional[pd.DataFrame],
+    usgs_df: Optional[pd.DataFrame],
+    eonet_df: Optional[pd.DataFrame],
+    meteo_summary: Optional[Dict[str, Any]],
+) -> str:
+    combined = clamp(base_need + map_adj + news_overlay + usgs_pts + meteo_pts + eonet_pts, 0, 100)
+    risk, _ = risk_bucket(combined)
 
+    lines = []
+    lines.append("# Infrastructure Risk Brief")
+    lines.append("")
+    lines.append(f"**Risk level:** {risk}")
+    lines.append(f"**Base need (model):** {base_need:0.1f}%  _(model: {model_kind})_")
+    lines.append("")
+    lines.append("## Overlay breakdown")
+    lines.append(f"- Map adjustment: {map_adj:+0.1f}")
+    lines.append(f"- News/disaster overlay: {news_overlay:+0.1f}")
+    lines.append(f"- Earthquakes (USGS): {usgs_pts:+0.1f}")
+    lines.append(f"- Weather (Open-Meteo): {meteo_pts:+0.1f}")
+    lines.append(f"- Hazards (NASA EONET): {eonet_pts:+0.1f}")
+    lines.append(f"- **Combined need:** {combined:0.1f}%")
+    lines.append("")
 
-def analyst_reply(user_text: str, ctx: Dict[str, Any]) -> str:
-    t = (user_text or "").strip().lower()
-    if not t:
-        return "Ask: “summary”, “actions”, “map”, or “events”."
+    if country_label:
+        lines.append("## Context")
+        lines.append(f"- Country code: `{country_label}`")
+        lines.append("")
 
-    if ctx.get("base_need") is None:
-        return (
-            "No single prediction is available yet.\n\n"
-            "Go to Predictor tab, run a single prediction, then come back here."
-        )
+    lines.append("## Input indicators")
+    for k in FEATURES:
+        lines.append(f"- {k}: {inputs.get(k)}")
+    lines.append("")
 
-    base = float(ctx["base_need"])
-    combined = float(ctx["combined_need"])
-    mk = ctx.get("model_kind", "unknown")
-    badge, _ = risk_bucket(combined)
+    lines.append("## Recommendations")
+    for r in recommendations(base_need, map_adj + news_overlay + usgs_pts + meteo_pts + eonet_pts):
+        lines.append(f"- {r}")
+    lines.append("")
 
-    if any(k in t for k in ["summary", "summarize", "overview", "risk"]):
-        return (
-            f"**Status:** {badge}\n"
-            f"**Base need:** {base:0.1f}% (model: {mk})\n"
-            f"**Map adjustment:** {ctx['map_adjustment']:+0.1f}\n"
-            f"**Events overlay:** {ctx['news_overlay']:+0.1f} (GDELT: {ctx['gdelt_rows']}, ReliefWeb: {ctx['relief_rows']})\n"
-            f"**Combined need:** {combined:0.1f}%"
-        )
+    if meteo_summary:
+        lines.append("## Weather snapshot (Open-Meteo)")
+        for k, v in meteo_summary.items():
+            lines.append(f"- {k}: {v}")
+        lines.append("")
 
-    if any(k in t for k in ["map", "signals", "roads", "hospital", "school", "overpass"]):
-        sig = ctx.get("signals")
-        if not isinstance(sig, dict):
-            return "No map signals loaded. Open Map Signals tab and click on the map."
-        return (
-            "Map signals summarize nearby infrastructure density.\n\n"
-            f"- Roads: {sig.get('roads', 0)}\n"
-            f"- Hospitals: {sig.get('hospitals', 0)}\n"
-            f"- Schools: {sig.get('schools', 0)}\n"
-            f"- Clinics: {sig.get('clinics', 0)}\n"
-            f"- Power-related: {sig.get('power', 0)}\n"
-            f"- Water towers: {sig.get('water', 0)}\n\n"
-            "Lower density typically increases need (overlay)."
-        )
+    if map_signals:
+        lines.append("## Map signals (OpenStreetMap/Overpass)")
+        for k, v in map_signals.items():
+            lines.append(f"- {k}: {v}")
+        lines.append("")
 
-    if any(k in t for k in ["actions", "recommend", "plan", "precaution", "prevention", "mitigation"]):
-        overlay = float(ctx["map_adjustment"] + ctx["news_overlay"])
-        recs = recommendations(base, overlay)
-        return "**Recommended actions:**\n" + "\n".join([f"- {x}" for x in recs])
+    def _append_feed(df: pd.DataFrame, title: str, max_items: int = 8):
+        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+            return
+        lines.append(f"## {title}")
+        for _, row in df.head(max_items).iterrows():
+            t = str(row.get("title", "")).strip()
+            u = str(row.get("url", "")).strip()
+            d = str(row.get("date", "") or row.get("seendate", "")).strip()
+            if u:
+                lines.append(f"- [{t}]({u}) ({d})")
+            else:
+                lines.append(f"- {t} ({d})")
+        lines.append("")
 
-    if any(k in t for k in ["events", "news", "gdelt", "reliefweb"]):
-        return (
-            "Events overlay is additive (does not retrain the model).\n\n"
-            f"- GDELT items: {ctx['gdelt_rows']}\n"
-            f"- ReliefWeb items: {ctx['relief_rows']}\n"
-            f"- Events overlay: {ctx['news_overlay']:+0.1f} / 15\n"
-        )
+    _append_feed(gdelt_df, "Recent news signals (GDELT)")
+    _append_feed(relief_df, "Recent disaster reports (ReliefWeb)")
 
-    return "Try: **summary**, **actions**, **map**, or **events**."
+    if usgs_df is not None and isinstance(usgs_df, pd.DataFrame) and not usgs_df.empty:
+        lines.append("## Nearby earthquakes (USGS)")
+        for _, r in usgs_df.head(10).iterrows():
+            lines.append(f"- M{r.get('mag')} | {r.get('distance_km')} km | {r.get('place')} | {r.get('url')}")
+        lines.append("")
+
+    if eonet_df is not None and isinstance(eonet_df, pd.DataFrame) and not eonet_df.empty:
+        lines.append("## Nearby hazards (NASA EONET)")
+        for _, r in eonet_df.head(10).iterrows():
+            lines.append(f"- {r.get('categories')} | {r.get('distance_km')} km | {r.get('title')} | {r.get('url')}")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("Generated by the app using free sources and local model inference.")
+    return "\n".join(lines)
