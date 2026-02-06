@@ -2,15 +2,14 @@ import os
 import time
 import json
 import math
-from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, Tuple, List
+from datetime import datetime
+from typing import Dict, Any, Tuple, List
 
 import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
 import plotly.express as px
-import plotly.graph_objects as go
 
 # Map
 import folium
@@ -22,7 +21,7 @@ try:
 except Exception:
     ort = None
 
-# Optional joblib fallback (may fail if numpy mismatch; ONNX recommended)
+# Optional joblib fallback
 try:
     import joblib
 except Exception:
@@ -54,6 +53,8 @@ GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 RELIEFWEB_URL = "https://api.reliefweb.int/v1/reports"
 
 DEFAULT_RADIUS_M = 5000  # Overpass radius around click point
+
+UA_HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
 
 # -----------------------------
@@ -177,59 +178,6 @@ def load_joblib_model(path: str):
         return None
 
 
-def model_predict_proba(features_row: np.ndarray) -> Tuple[float, str]:
-    """
-    Returns (need_probability_0_100, model_kind).
-    If model fails, falls back to heuristic.
-    """
-    # Try ONNX first (recommended for Cloud)
-    sess = load_onnx_session(MODEL_ONNX_PATH)
-    if sess is not None:
-        try:
-            input_name = sess.get_inputs()[0].name
-            outputs = sess.run(None, {input_name: features_row.astype(np.float32)})
-            out = outputs[0]
-
-            # Support common output shapes:
-            # (1,2) probs, or (1,) score/logit. We'll handle both.
-            if isinstance(out, list):
-                out = np.array(out)
-
-            out = np.array(out)
-            if out.ndim == 2 and out.shape[1] >= 2:
-                prob_need = float(out[0, 1])
-            else:
-                # If it's a score, squash
-                score = float(out.reshape(-1)[0])
-                prob_need = 1 / (1 + math.exp(-score))
-
-            return clamp(prob_need * 100.0, 0.0, 100.0), "onnx"
-        except Exception:
-            pass
-
-    # Try joblib
-    mdl = load_joblib_model(MODEL_JOBLIB_PATH)
-    if mdl is not None:
-        try:
-            if hasattr(mdl, "predict_proba"):
-                p = float(mdl.predict_proba(features_row)[0, 1])
-                return clamp(p * 100.0, 0.0, 100.0), "joblib"
-            pred = float(mdl.predict(features_row)[0])
-            return clamp(pred * 100.0, 0.0, 100.0), "joblib"
-        except Exception:
-            pass
-
-    # Heuristic fallback (always works)
-    d = {
-        "Population_Millions": float(features_row[0, 0]),
-        "GDP_per_capita_USD": float(features_row[0, 1]),
-        "HDI_Index": float(features_row[0, 2]),
-        "Urbanization_Rate": float(features_row[0, 3]),
-    }
-    need = heuristic_need_score(d)
-    return need, "heuristic"
-
-
 def heuristic_need_score(country_data: Dict[str, float]) -> float:
     gdp = country_data["GDP_per_capita_USD"]
     hdi = country_data["HDI_Index"]
@@ -245,11 +193,52 @@ def heuristic_need_score(country_data: Dict[str, float]) -> float:
     return clamp(score, 0, 100)
 
 
+def model_predict_proba(features_row: np.ndarray) -> Tuple[float, str]:
+    # ONNX first
+    sess = load_onnx_session(MODEL_ONNX_PATH)
+    if sess is not None:
+        try:
+            input_name = sess.get_inputs()[0].name
+            outputs = sess.run(None, {input_name: features_row.astype(np.float32)})
+            out = np.array(outputs[0])
+
+            if out.ndim == 2 and out.shape[1] >= 2:
+                prob_need = float(out[0, 1])
+            else:
+                score = float(out.reshape(-1)[0])
+                prob_need = 1 / (1 + math.exp(-score))
+
+            return clamp(prob_need * 100.0, 0.0, 100.0), "onnx"
+        except Exception:
+            pass
+
+    # joblib fallback
+    mdl = load_joblib_model(MODEL_JOBLIB_PATH)
+    if mdl is not None:
+        try:
+            if hasattr(mdl, "predict_proba"):
+                p = float(mdl.predict_proba(features_row)[0, 1])
+                return clamp(p * 100.0, 0.0, 100.0), "joblib"
+            pred = float(mdl.predict(features_row)[0])
+            return clamp(pred * 100.0, 0.0, 100.0), "joblib"
+        except Exception:
+            pass
+
+    # heuristic
+    d = {
+        "Population_Millions": float(features_row[0, 0]),
+        "GDP_per_capita_USD": float(features_row[0, 1]),
+        "HDI_Index": float(features_row[0, 2]),
+        "Urbanization_Rate": float(features_row[0, 3]),
+    }
+    need = heuristic_need_score(d)
+    return need, "heuristic"
+
+
 # -----------------------------
 # Overpass: map signals
 # -----------------------------
 def overpass_query(lat: float, lon: float, radius_m: int) -> str:
-    # Keep it small and safe. Count a few core infrastructure POIs.
     return f"""
     [out:json][timeout:25];
     (
@@ -268,7 +257,12 @@ def overpass_query(lat: float, lon: float, radius_m: int) -> str:
 @st.cache_data(ttl=60 * 10, show_spinner=False)
 def fetch_overpass_signals(lat: float, lon: float, radius_m: int) -> Dict[str, Any]:
     q = overpass_query(lat, lon, radius_m)
-    r = requests.post(OVERPASS_URL, data=q.encode("utf-8"), headers={"Content-Type": "text/plain"})
+    r = requests.post(
+        OVERPASS_URL,
+        data=q.encode("utf-8"),
+        headers={"Content-Type": "text/plain", **UA_HEADERS},
+        timeout=25,
+    )
     r.raise_for_status()
     data = r.json()
 
@@ -305,12 +299,6 @@ def fetch_overpass_signals(lat: float, lon: float, radius_m: int) -> Dict[str, A
 
 
 def map_context_adjustment(signals: Dict[str, Any]) -> float:
-    """
-    Returns adjustment in range [-10, +15] points.
-    Idea:
-      - More infra density => slightly lower need
-      - Very low infra density => raise need
-    """
     roads = signals.get("roads", 0)
     key_pois = (
         signals.get("hospitals", 0)
@@ -320,9 +308,7 @@ def map_context_adjustment(signals: Dict[str, Any]) -> float:
         + signals.get("water", 0)
     )
 
-    # Normalize (very rough)
     infra_density = (min(roads, 200) / 200.0) * 0.6 + (min(key_pois, 40) / 40.0) * 0.4
-    # If density is low, add up to +15. If high, reduce up to -10.
     adj = (0.35 - infra_density) * 45.0
     return clamp(adj, -10.0, 15.0)
 
@@ -331,70 +317,95 @@ def map_context_adjustment(signals: Dict[str, Any]) -> float:
 # News / disaster feeds (FREE)
 # -----------------------------
 @st.cache_data(ttl=60 * 15, show_spinner=False)
-def fetch_gdelt(query: str, mode: str = "ArtList", max_records: int = 20) -> pd.DataFrame:
+def fetch_gdelt(query: str, max_records: int = 20) -> pd.DataFrame:
+    # keep small to avoid rate limits
+    max_records = int(clamp(max_records, 5, 25))
+
     params = {
         "query": query,
-        "mode": mode,
+        "mode": "ArtList",
         "format": "json",
         "maxrecords": max_records,
         "formatdatetime": "true",
         "sort": "HybridRel",
     }
-    r = requests.get(GDELT_DOC_URL, params=params, timeout=20)
-    r.raise_for_status()
-    j = r.json()
-    arts = (j.get("articles") or [])
-    if not arts:
-        return pd.DataFrame(columns=["title", "url", "sourceCountry", "seendate", "tone"])
-    rows = []
-    for a in arts:
-        rows.append({
-            "title": a.get("title"),
-            "url": a.get("url"),
-            "sourceCountry": a.get("sourceCountry"),
-            "seendate": a.get("seendate"),
-            "tone": a.get("tone"),
-        })
-    return pd.DataFrame(rows)
+
+    last_err = None
+    for attempt in range(4):
+        try:
+            r = requests.get(GDELT_DOC_URL, params=params, timeout=20, headers=UA_HEADERS)
+
+            if r.status_code == 429:
+                time.sleep(1.5 * (2 ** attempt))
+                last_err = "429 Too Many Requests"
+                continue
+
+            r.raise_for_status()
+            j = r.json()
+            arts = j.get("articles") or []
+            rows = []
+            for a in arts:
+                rows.append({
+                    "title": a.get("title"),
+                    "url": a.get("url"),
+                    "sourceCountry": a.get("sourceCountry"),
+                    "seendate": a.get("seendate"),
+                    "tone": a.get("tone"),
+                })
+            return pd.DataFrame(rows)
+        except Exception as e:
+            last_err = str(e)
+            time.sleep(0.7 * (attempt + 1))
+
+    raise RuntimeError(f"GDELT fetch failed after retries: {last_err}")
 
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def fetch_reliefweb(query: str, limit: int = 15) -> pd.DataFrame:
+    # strict bounds
+    limit = int(clamp(limit, 5, 30))
+
     payload = {
-        "appname": "global-infra-ai",
-        "query": {
-            "value": query
-        },
+        "query": {"value": query},
         "limit": limit,
-        "profile": "full",
-        "sort": ["date:desc"],
+        "profile": "lite",
+        "sort": ["date.created:desc"],
+        "fields": {"include": ["title", "url", "date.created", "status", "type"]},
     }
-    r = requests.post(RELIEFWEB_URL, json=payload, timeout=25)
+
+    r = requests.post(
+        RELIEFWEB_URL,
+        json=payload,
+        timeout=25,
+        headers={"Content-Type": "application/json", **UA_HEADERS},
+    )
     r.raise_for_status()
     j = r.json()
+
     data = j.get("data") or []
     rows = []
     for item in data:
         fields = item.get("fields") or {}
+        date_created = None
+        if isinstance(fields.get("date"), dict):
+            date_created = (fields.get("date", {}) or {}).get("created")
+
         rows.append({
             "title": fields.get("title"),
-            "url": (fields.get("url") or ""),
-            "date": fields.get("date", {}).get("created"),
+            "url": fields.get("url", ""),
+            "date": date_created,
             "status": fields.get("status"),
             "type": ", ".join([t.get("name") for t in (fields.get("type") or []) if isinstance(t, dict)]),
         })
+
     return pd.DataFrame(rows)
 
 
 def disaster_overlay_score(gdelt_df: pd.DataFrame, relief_df: pd.DataFrame) -> float:
-    """
-    Returns 0..15 overlay points based on volume + negative tone.
-    """
     score = 0.0
-    if not gdelt_df.empty:
+    if isinstance(gdelt_df, pd.DataFrame) and not gdelt_df.empty:
         score += min(len(gdelt_df), 20) * 0.3
-        # tone: negative often < 0. We'll boost if very negative
-        tones = pd.to_numeric(gdelt_df.get("tone", pd.Series([])), errors="coerce").dropna()
+        tones = pd.to_numeric(gdelt_df.get("tone", pd.Series(dtype=float)), errors="coerce").dropna()
         if len(tones) > 0:
             avg_tone = float(tones.mean())
             if avg_tone < -2:
@@ -402,14 +413,13 @@ def disaster_overlay_score(gdelt_df: pd.DataFrame, relief_df: pd.DataFrame) -> f
             elif avg_tone < -1:
                 score += 2.0
 
-    if not relief_df.empty:
+    if isinstance(relief_df, pd.DataFrame) and not relief_df.empty:
         score += min(len(relief_df), 15) * 0.4
 
     return clamp(score, 0.0, 15.0)
 
 
 def recommendations(need: float, overlay: float) -> List[str]:
-    # need: 0..100, overlay: 0..15
     total = clamp(need + overlay, 0, 100)
     if total >= 70:
         return [
@@ -437,7 +447,10 @@ def recommendations(need: float, overlay: float) -> List[str]:
 def render_header():
     st.title("🌍 Global Infrastructure AI")
     st.caption("World-style indicators + ML model. Streamlit Cloud compatible (ONNX-first).")
-    st.markdown("<div class='small-muted'>Tip: ONNX is the safest format on Streamlit Cloud (avoids numpy/joblib mismatches).</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='small-muted'>Tip: ONNX is the safest format on Streamlit Cloud (avoids numpy/joblib mismatches).</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def render_sidebar() -> Dict[str, Any]:
@@ -463,9 +476,13 @@ def render_sidebar() -> Dict[str, Any]:
 def render_dashboard(df: pd.DataFrame):
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.markdown("<div class='card'><h4>Countries</h4><h2>%d</h2></div>" % len(df), unsafe_allow_html=True)
+        st.markdown(f"<div class='card'><h4>Countries</h4><h2>{len(df)}</h2></div>", unsafe_allow_html=True)
     with c2:
-        st.markdown("<div class='card'><h4>Avg GDP/capita</h4><h2>$%s</h2></div>" % f"{df['GDP_per_capita_USD'].mean():,.0f}", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='card'><h4>Avg GDP/capita</h4><h2>$%s</h2></div>"
+            % f"{df['GDP_per_capita_USD'].mean():,.0f}",
+            unsafe_allow_html=True,
+        )
     with c3:
         st.markdown("<div class='card'><h4>Avg HDI</h4><h2>%0.3f</h2></div>" % df["HDI_Index"].mean(), unsafe_allow_html=True)
     with c4:
@@ -500,7 +517,6 @@ def render_predictor(default_df: pd.DataFrame, cfg: Dict[str, Any]):
 
     left, right = st.columns([1.2, 1])
 
-    # INPUT
     with left:
         method = st.radio("Input method", ["Select country (fallback)", "Custom input", "Upload CSV"], horizontal=True)
 
@@ -538,7 +554,6 @@ def render_predictor(default_df: pd.DataFrame, cfg: Dict[str, Any]):
                     st.success(f"Loaded {len(df_up):,} rows. Click Predict to run bulk predictions.")
                     st.session_state["uploaded_df"] = df_up
 
-    # PREDICT
     with right:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown("### Run prediction")
@@ -574,7 +589,6 @@ def render_predictor(default_df: pd.DataFrame, cfg: Dict[str, Any]):
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # RESULTS
     if "single_pred" in st.session_state:
         pred = st.session_state["single_pred"]
         need = float(pred["need"])
@@ -584,9 +598,9 @@ def render_predictor(default_df: pd.DataFrame, cfg: Dict[str, Any]):
         st.markdown("---")
         st.subheader("Result")
 
-        # Stable meter (Streamlit native) to avoid gauge rendering issues
         st.markdown("#### Need meter (stable)")
         st.progress(int(clamp(need, 0, 100)))
+
         st.markdown(
             f"<span class='badge {badge_cls}'>{badge_text}</span> &nbsp; "
             f"<b>Infrastructure Need</b>: <span style='font-size:1.8rem'>{need:0.1f}%</span>"
@@ -594,7 +608,6 @@ def render_predictor(default_df: pd.DataFrame, cfg: Dict[str, Any]):
             unsafe_allow_html=True,
         )
 
-        # Need vs Sufficient
         fig = px.bar(
             pd.DataFrame({"Metric": ["Need", "Sufficient"], "Value": [need, 100 - need]}),
             x="Metric",
@@ -678,20 +691,22 @@ def render_events_monitor(cfg: Dict[str, Any]):
             "Keywords (examples: flood OR cyclone OR bridge collapse OR infrastructure damage)",
             value="flood OR infrastructure damage OR bridge collapse OR cyclone",
         )
-        max_records = st.slider("Max news records", 5, 50, 20, step=5)
+        # HARD cap to avoid 429
+        max_records = st.slider("Max news records", 5, 25, 20, step=5)
 
         if st.button("Fetch latest", type="primary"):
             with st.spinner("Fetching feeds..."):
+                gd = pd.DataFrame()
+                rw = pd.DataFrame()
+
                 try:
                     gd = fetch_gdelt(query=query, max_records=max_records)
                 except Exception as e:
-                    gd = pd.DataFrame()
                     st.error(f"GDELT fetch failed: {e}")
 
                 try:
                     rw = fetch_reliefweb(query=query, limit=min(20, max_records))
                 except Exception as e:
-                    rw = pd.DataFrame()
                     st.error(f"ReliefWeb fetch failed: {e}")
 
                 st.session_state["gdelt_df"] = gd
@@ -702,7 +717,7 @@ def render_events_monitor(cfg: Dict[str, Any]):
         st.markdown("### Overlay risk (events)")
         gd = st.session_state.get("gdelt_df", pd.DataFrame())
         rw = st.session_state.get("relief_df", pd.DataFrame())
-        overlay = disaster_overlay_score(gd, rw) if (gd is not None and rw is not None) else 0.0
+        overlay = disaster_overlay_score(gd, rw)
         st.metric("Overlay points", f"{overlay:0.1f} / 15")
         st.markdown("<div class='small-muted'>This is an additive overlay, not model retraining.</div>", unsafe_allow_html=True)
         st.session_state["news_overlay"] = overlay
