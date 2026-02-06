@@ -1,4 +1,4 @@
-# app.py - GLOBAL INFRASTRUCTURE AI DASHBOARD
+# app.py - GLOBAL INFRASTRUCTURE AI DASHBOARD (FIXED FOR PYTHON 3.13)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,18 +7,14 @@ import plotly.graph_objects as go
 import plotly.figure_factory as ff
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import pickle
 import time
 from datetime import datetime, timedelta
-import requests
-from io import StringIO
 import warnings
 import seaborn as sns
 import matplotlib.pyplot as plt
-from geopy.geocoders import Nominatim
-import folium
-from streamlit_folium import folium_static
+import io
 warnings.filterwarnings('ignore')
 
 # Set page configuration
@@ -131,11 +127,15 @@ if 'global_data' not in st.session_state:
     st.session_state.global_data = None
 if 'training_history' not in st.session_state:
     st.session_state.training_history = []
+if 'global_data_loaded' not in st.session_state:
+    st.session_state.global_data_loaded = False
 
-# Load REAL GLOBAL DATA from multiple sources
-@st.cache_data(ttl=3600)
+# Load REAL GLOBAL DATA from multiple sources (MANUAL CACHING)
 def load_global_data():
     """Load real global country data from multiple sources"""
+    
+    if st.session_state.global_data_loaded and 'global_data' in st.session_state:
+        return st.session_state.global_data
     
     # Real data for 150+ countries
     global_data = {
@@ -408,12 +408,21 @@ def load_global_data():
     df['Population_Density'] = df['Population_Millions'] * 1000000 / df['Area_sq_km']
     df['Economic_Productivity'] = df['GDP_per_capita_USD'] * df['Population_Millions']
     
+    # Cache in session state
+    st.session_state.global_data = df
+    st.session_state.global_data_loaded = True
+    
     return df
 
-# Generate synthetic training data with realistic distributions
-@st.cache_data
+# Generate synthetic training data with realistic distributions (MANUAL CACHING)
 def generate_synthetic_training_data(base_df, n_samples=3000000):
     """Generate high-quality synthetic training data"""
+    
+    # Check if we already have cached synthetic data
+    cache_key = f"synthetic_data_{n_samples}"
+    if cache_key in st.session_state:
+        return st.session_state[cache_key]
+    
     np.random.seed(42)
     
     synthetic_samples = []
@@ -476,6 +485,10 @@ def generate_synthetic_training_data(base_df, n_samples=3000000):
             synthetic_samples.append(sample)
     
     df_synthetic = pd.DataFrame(synthetic_samples[:n_samples])
+    
+    # Cache in session state
+    st.session_state[cache_key] = df_synthetic
+    
     return df_synthetic
 
 # Enhanced model training function
@@ -483,7 +496,6 @@ def train_global_model():
     """Train the AI model with comprehensive global data"""
     with st.spinner("🚀 Loading global data..."):
         df_real = load_global_data()
-        st.session_state.global_data = df_real
     
     # Progress tracking
     progress_bar = st.progress(0)
@@ -493,7 +505,7 @@ def train_global_model():
     status_text.text("📊 Generating synthetic training data...")
     for i in range(20):
         progress_bar.progress(i/100)
-        time.sleep(0.05)
+        time.sleep(0.01)
     
     synthetic_data = generate_synthetic_training_data(
         df_real, 
@@ -504,7 +516,7 @@ def train_global_model():
     status_text.text("⚙️ Preparing features...")
     for i in range(20, 40):
         progress_bar.progress(i/100)
-        time.sleep(0.03)
+        time.sleep(0.01)
     
     # Feature engineering
     features = [
@@ -536,7 +548,7 @@ def train_global_model():
     
     for i in range(40, 60):
         progress_bar.progress(i/100)
-        time.sleep(0.02)
+        time.sleep(0.01)
     
     # Step 4: Train model
     status_text.text("🤖 Training AI model (3M samples)...")
@@ -552,7 +564,7 @@ def train_global_model():
     
     for i in range(60, 90):
         progress_bar.progress(i/100)
-        time.sleep(0.02)
+        time.sleep(0.01)
     
     # Step 5: Evaluate model
     status_text.text("📈 Evaluating model performance...")
@@ -568,7 +580,7 @@ def train_global_model():
     
     for i in range(90, 100):
         progress_bar.progress(i/100)
-        time.sleep(0.02)
+        time.sleep(0.01)
     
     # Feature importance
     feature_importance = pd.DataFrame({
@@ -611,31 +623,31 @@ def predict_infrastructure(country_data):
     if not st.session_state.model_trained:
         return None
     
-    # Prepare input data
-    features = [
-        'Population_Millions', 
-        'Area_sq_km', 
-        'GDP_per_capita_USD',
-        'Urbanization_Rate', 
-        'HDI_Index'
-    ]
-    
-    # Calculate derived features
-    country_data['Population_Density'] = (country_data['Population_Millions'] * 1000000) / country_data['Area_sq_km']
-    country_data['Economic_Productivity'] = country_data['GDP_per_capita_USD'] * country_data['Population_Millions']
-    
-    # Prepare input DataFrame
-    input_df = pd.DataFrame([country_data])
-    
-    # Add one-hot encoded features
-    for col in ['Continent', 'Development_Status']:
-        if col in country_data:
-            for value in ['Asia', 'Europe', 'North America', 'South America', 'Africa', 'Oceania',
-                         'Developed', 'Developing', 'Least Developed']:
-                input_df[f'{col}_{value}'] = 1 if country_data.get(col) == value else 0
-    
-    # Get probability prediction
     try:
+        # Prepare input data
+        features = [
+            'Population_Millions', 
+            'Area_sq_km', 
+            'GDP_per_capita_USD',
+            'Urbanization_Rate', 
+            'HDI_Index'
+        ]
+        
+        # Calculate derived features
+        country_data['Population_Density'] = (country_data['Population_Millions'] * 1000000) / country_data['Area_sq_km']
+        country_data['Economic_Productivity'] = country_data['GDP_per_capita_USD'] * country_data['Population_Millions']
+        
+        # Prepare input DataFrame
+        input_df = pd.DataFrame([country_data])
+        
+        # Add one-hot encoded features
+        for col in ['Continent', 'Development_Status']:
+            if col in country_data:
+                for value in ['Asia', 'Europe', 'North America', 'South America', 'Africa', 'Oceania',
+                             'Developed', 'Developing', 'Least Developed']:
+                    input_df[f'{col}_{value}'] = 1 if country_data.get(col) == value else 0
+        
+        # Get probability prediction
         proba = st.session_state.model.predict_proba(input_df)[0]
         
         # Calculate confidence based on probability distribution
@@ -662,7 +674,7 @@ def predict_infrastructure(country_data):
             'risk_color': risk_color,
             'prediction': 1 if need_probability > 50 else 0
         }
-    except:
+    except Exception as e:
         # Fallback calculation if model fails
         need_score = (
             (1 - min(country_data['GDP_per_capita_USD'] / 50000, 1)) * 40 +
