@@ -10,8 +10,6 @@ import pandas as pd
 import requests
 import streamlit as st
 import plotly.express as px
-
-# Map
 import folium
 from streamlit_folium import st_folium
 
@@ -46,15 +44,24 @@ FEATURES = ["Population_Millions", "GDP_per_capita_USD", "HDI_Index", "Urbanizat
 MODEL_ONNX_PATH = os.path.join("models", "infra_model.onnx")
 MODEL_JOBLIB_PATH = os.path.join("models", "infra_model.joblib")
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+# Overpass: use multiple endpoints (robust)
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
+    "https://overpass.nchc.org.tw/api/interpreter",
+]
 
-# FREE news/disaster sources
+# Free news/disaster feeds
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 RELIEFWEB_URL = "https://api.reliefweb.int/v1/reports"
 
-DEFAULT_RADIUS_M = 5000  # Overpass radius around click point
+DEFAULT_RADIUS_M = 5000
 
-UA_HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+UA_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; GlobalInfrastructureAI/1.0; +https://streamlit.io)",
+    "Accept": "application/json,text/plain,*/*",
+}
 
 
 # -----------------------------
@@ -179,10 +186,10 @@ def load_joblib_model(path: str):
 
 
 def heuristic_need_score(country_data: Dict[str, float]) -> float:
-    gdp = country_data["GDP_per_capita_USD"]
-    hdi = country_data["HDI_Index"]
-    urb = country_data["Urbanization_Rate"]
-    pop = country_data["Population_Millions"]
+    gdp = float(country_data["GDP_per_capita_USD"])
+    hdi = float(country_data["HDI_Index"])
+    urb = float(country_data["Urbanization_Rate"])
+    pop = float(country_data["Population_Millions"])
 
     score = (
         (1 - min(gdp / 50000, 1)) * 42
@@ -194,7 +201,9 @@ def heuristic_need_score(country_data: Dict[str, float]) -> float:
 
 
 def model_predict_proba(features_row: np.ndarray) -> Tuple[float, str]:
-    # ONNX first
+    """Returns (need_probability_0_100, model_kind)."""
+
+    # ONNX first (Cloud-safe)
     sess = load_onnx_session(MODEL_ONNX_PATH)
     if sess is not None:
         try:
@@ -224,7 +233,7 @@ def model_predict_proba(features_row: np.ndarray) -> Tuple[float, str]:
         except Exception:
             pass
 
-    # heuristic
+    # heuristic fallback
     d = {
         "Population_Millions": float(features_row[0, 0]),
         "GDP_per_capita_USD": float(features_row[0, 1]),
@@ -239,6 +248,7 @@ def model_predict_proba(features_row: np.ndarray) -> Tuple[float, str]:
 # Overpass: map signals
 # -----------------------------
 def overpass_query(lat: float, lon: float, radius_m: int) -> str:
+    # Smaller query = fewer timeouts
     return f"""
     [out:json][timeout:25];
     (
@@ -256,46 +266,65 @@ def overpass_query(lat: float, lon: float, radius_m: int) -> str:
 
 @st.cache_data(ttl=60 * 10, show_spinner=False)
 def fetch_overpass_signals(lat: float, lon: float, radius_m: int) -> Dict[str, Any]:
-    q = overpass_query(lat, lon, radius_m)
-    r = requests.post(
-        OVERPASS_URL,
-        data=q.encode("utf-8"),
-        headers={"Content-Type": "text/plain", **UA_HEADERS},
-        timeout=25,
-    )
-    r.raise_for_status()
-    data = r.json()
+    radius_m = int(clamp(radius_m, 1000, 8000))
+    q = overpass_query(lat, lon, radius_m).strip().encode("utf-8")
 
-    elements = data.get("elements", [])
-    signals = {
-        "roads": 0,
-        "hospitals": 0,
-        "schools": 0,
-        "clinics": 0,
-        "power": 0,
-        "water": 0,
-        "emergency": 0,
-    }
+    last_err = None
+    for base_url in OVERPASS_URLS:
+        for attempt in range(3):
+            try:
+                r = requests.post(
+                    base_url,
+                    data=q,
+                    headers={"Content-Type": "text/plain", **UA_HEADERS},
+                    timeout=35,
+                )
 
-    for el in elements:
-        tags = el.get("tags", {}) or {}
-        if "highway" in tags:
-            signals["roads"] += 1
-        if tags.get("amenity") == "hospital":
-            signals["hospitals"] += 1
-        if tags.get("amenity") == "school":
-            signals["schools"] += 1
-        if tags.get("amenity") == "clinic":
-            signals["clinics"] += 1
-        if "power" in tags:
-            signals["power"] += 1
-        if tags.get("man_made") == "water_tower":
-            signals["water"] += 1
-        if "emergency" in tags:
-            signals["emergency"] += 1
+                if r.status_code in (429, 502, 503, 504):
+                    time.sleep(1.5 * (2 ** attempt))
+                    last_err = f"{r.status_code} from {base_url}"
+                    continue
 
-    signals["radius_m"] = radius_m
-    return signals
+                r.raise_for_status()
+                data = r.json()
+
+                elements = data.get("elements", [])
+                signals = {
+                    "roads": 0,
+                    "hospitals": 0,
+                    "schools": 0,
+                    "clinics": 0,
+                    "power": 0,
+                    "water": 0,
+                    "emergency": 0,
+                }
+
+                for el in elements:
+                    tags = el.get("tags", {}) or {}
+                    if "highway" in tags:
+                        signals["roads"] += 1
+                    if tags.get("amenity") == "hospital":
+                        signals["hospitals"] += 1
+                    if tags.get("amenity") == "school":
+                        signals["schools"] += 1
+                    if tags.get("amenity") == "clinic":
+                        signals["clinics"] += 1
+                    if "power" in tags:
+                        signals["power"] += 1
+                    if tags.get("man_made") == "water_tower":
+                        signals["water"] += 1
+                    if "emergency" in tags:
+                        signals["emergency"] += 1
+
+                signals["radius_m"] = radius_m
+                signals["endpoint_used"] = base_url
+                return signals
+
+            except Exception as e:
+                last_err = f"{base_url} -> {e}"
+                time.sleep(0.8 * (attempt + 1))
+
+    raise RuntimeError(f"Overpass failed on all endpoints: {last_err}")
 
 
 def map_context_adjustment(signals: Dict[str, Any]) -> float:
@@ -307,7 +336,6 @@ def map_context_adjustment(signals: Dict[str, Any]) -> float:
         + signals.get("power", 0)
         + signals.get("water", 0)
     )
-
     infra_density = (min(roads, 200) / 200.0) * 0.6 + (min(key_pois, 40) / 40.0) * 0.4
     adj = (0.35 - infra_density) * 45.0
     return clamp(adj, -10.0, 15.0)
@@ -317,13 +345,10 @@ def map_context_adjustment(signals: Dict[str, Any]) -> float:
 # News / disaster feeds (FREE)
 # -----------------------------
 @st.cache_data(ttl=60 * 15, show_spinner=False)
-def fetch_gdelt(query: str, max_records: int = 20) -> pd.DataFrame:
-    # keep small to avoid rate limits
-    max_records = int(clamp(max_records, 5, 25))
-
+def fetch_gdelt(query: str, mode: str = "ArtList", max_records: int = 20) -> pd.DataFrame:
     params = {
         "query": query,
-        "mode": "ArtList",
+        "mode": mode,
         "format": "json",
         "maxrecords": max_records,
         "formatdatetime": "true",
@@ -331,74 +356,61 @@ def fetch_gdelt(query: str, max_records: int = 20) -> pd.DataFrame:
     }
 
     last_err = None
-    for attempt in range(4):
+    for attempt in range(3):
         try:
-            r = requests.get(GDELT_DOC_URL, params=params, timeout=20, headers=UA_HEADERS)
-
+            r = requests.get(GDELT_DOC_URL, params=params, headers=UA_HEADERS, timeout=25)
             if r.status_code == 429:
-                time.sleep(1.5 * (2 ** attempt))
+                time.sleep(2.0 * (2 ** attempt))
                 last_err = "429 Too Many Requests"
                 continue
-
             r.raise_for_status()
             j = r.json()
-            arts = j.get("articles") or []
+            arts = (j.get("articles") or [])
             rows = []
             for a in arts:
-                rows.append({
-                    "title": a.get("title"),
-                    "url": a.get("url"),
-                    "sourceCountry": a.get("sourceCountry"),
-                    "seendate": a.get("seendate"),
-                    "tone": a.get("tone"),
-                })
-            return pd.DataFrame(rows)
+                rows.append(
+                    {
+                        "title": a.get("title"),
+                        "url": a.get("url"),
+                        "sourceCountry": a.get("sourceCountry"),
+                        "seendate": a.get("seendate"),
+                        "tone": a.get("tone"),
+                    }
+                )
+            return pd.DataFrame(rows, columns=["title", "url", "sourceCountry", "seendate", "tone"])
         except Exception as e:
             last_err = str(e)
-            time.sleep(0.7 * (attempt + 1))
+            time.sleep(1.0 * (attempt + 1))
 
-    raise RuntimeError(f"GDELT fetch failed after retries: {last_err}")
+    raise RuntimeError(f"GDELT fetch failed: {last_err}")
 
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def fetch_reliefweb(query: str, limit: int = 15) -> pd.DataFrame:
-    # strict bounds
-    limit = int(clamp(limit, 5, 30))
-
     payload = {
+        "appname": "global-infra-ai",
         "query": {"value": query},
-        "limit": limit,
-        "profile": "lite",
-        "sort": ["date.created:desc"],
-        "fields": {"include": ["title", "url", "date.created", "status", "type"]},
+        "limit": int(limit),
+        "profile": "full",
+        "sort": ["date:desc"],
     }
-
-    r = requests.post(
-        RELIEFWEB_URL,
-        json=payload,
-        timeout=25,
-        headers={"Content-Type": "application/json", **UA_HEADERS},
-    )
+    r = requests.post(RELIEFWEB_URL, json=payload, headers=UA_HEADERS, timeout=30)
     r.raise_for_status()
     j = r.json()
-
     data = j.get("data") or []
     rows = []
     for item in data:
         fields = item.get("fields") or {}
-        date_created = None
-        if isinstance(fields.get("date"), dict):
-            date_created = (fields.get("date", {}) or {}).get("created")
-
-        rows.append({
-            "title": fields.get("title"),
-            "url": fields.get("url", ""),
-            "date": date_created,
-            "status": fields.get("status"),
-            "type": ", ".join([t.get("name") for t in (fields.get("type") or []) if isinstance(t, dict)]),
-        })
-
-    return pd.DataFrame(rows)
+        rows.append(
+            {
+                "title": fields.get("title"),
+                "url": (fields.get("url") or ""),
+                "date": (fields.get("date") or {}).get("created"),
+                "status": fields.get("status"),
+                "type": ", ".join([t.get("name") for t in (fields.get("type") or []) if isinstance(t, dict)]),
+            }
+        )
+    return pd.DataFrame(rows, columns=["title", "url", "date", "status", "type"])
 
 
 def disaster_overlay_score(gdelt_df: pd.DataFrame, relief_df: pd.DataFrame) -> float:
@@ -424,25 +436,25 @@ def recommendations(need: float, overlay: float) -> List[str]:
     if total >= 70:
         return [
             "Prioritize critical infrastructure assessment (roads, power, water, healthcare).",
-            "Create an emergency maintenance plan with response timelines and contractors.",
+            "Create an emergency maintenance plan with response timelines and verified contractors.",
             "Strengthen flood drainage, slope stability, and backup power readiness.",
             "Run rapid vulnerability audits for bridges, hospitals, and substations.",
         ]
     if total >= 40:
         return [
-            "Plan targeted upgrades in transport, utilities, and public services.",
-            "Focus on resilience improvements (redundancy, maintenance cycles, inspections).",
-            "Track local hazard alerts and prioritize at-risk assets.",
+            "Plan targeted upgrades across transport, utilities, and public services.",
+            "Improve resilience through redundancy, inspections, and preventive maintenance cycles.",
+            "Track hazard alerts and prioritize at-risk assets for reinforcement.",
         ]
     return [
-        "Maintain assets with preventive maintenance and routine inspections.",
-        "Invest in smart monitoring (sensors, reporting, asset inventory).",
-        "Run resilience checks for extreme weather preparedness.",
+        "Maintain assets via preventive maintenance and routine inspections.",
+        "Invest in monitoring, asset inventory, and reporting workflows.",
+        "Run periodic resilience checks for extreme weather preparedness.",
     ]
 
 
 # -----------------------------
-# UI
+# UI parts
 # -----------------------------
 def render_header():
     st.title("🌍 Global Infrastructure AI")
@@ -484,9 +496,15 @@ def render_dashboard(df: pd.DataFrame):
             unsafe_allow_html=True,
         )
     with c3:
-        st.markdown("<div class='card'><h4>Avg HDI</h4><h2>%0.3f</h2></div>" % df["HDI_Index"].mean(), unsafe_allow_html=True)
+        st.markdown(
+            "<div class='card'><h4>Avg HDI</h4><h2>%0.3f</h2></div>" % df["HDI_Index"].mean(),
+            unsafe_allow_html=True,
+        )
     with c4:
-        st.markdown("<div class='card'><h4>Updated</h4><h2>%s</h2></div>" % datetime.utcnow().strftime("%Y-%m-%d"), unsafe_allow_html=True)
+        st.markdown(
+            "<div class='card'><h4>Updated</h4><h2>%s</h2></div>" % datetime.utcnow().strftime("%Y-%m-%d"),
+            unsafe_allow_html=True,
+        )
 
     st.markdown("---")
 
@@ -634,7 +652,7 @@ def render_predictor(default_df: pd.DataFrame, cfg: Dict[str, Any]):
 
 def render_map_signals(cfg: Dict[str, Any]):
     st.subheader("Optional: Map signals (FREE OSM)")
-    st.caption("Click on the map to fetch nearby infrastructure counts (Overpass API). These signals can adjust the displayed risk (overlay).")
+    st.caption("Click on the map to fetch nearby infrastructure counts (Overpass API). These signals can adjust displayed risk (overlay).")
 
     col1, col2 = st.columns([1.2, 1])
 
@@ -646,7 +664,7 @@ def render_map_signals(cfg: Dict[str, Any]):
     with col2:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown("### Click on map to get signals")
-        st.markdown("<div class='small-muted'>Overpass has rate limits. We cache results for 10 minutes.</div>", unsafe_allow_html=True)
+        st.markdown("<div class='small-muted'>Overpass has rate limits. We cache results for 10 minutes and use fallback endpoints.</div>", unsafe_allow_html=True)
 
         lat, lon = None, None
         if map_data and map_data.get("last_clicked"):
@@ -657,14 +675,15 @@ def render_map_signals(cfg: Dict[str, Any]):
             st.info("Click on the map first.")
         else:
             st.write(f"Selected point: `{lat:.5f}, {lon:.5f}`")
-            radius_m = int(cfg["radius_m"])
+            radius_m = int(clamp(cfg["radius_m"], 1000, 8000))
             with st.spinner("Fetching map signals (Overpass)..."):
                 try:
                     sig = fetch_overpass_signals(lat, lon, radius_m)
                     st.session_state["map_signals"] = sig
-                    st.success("Signals loaded.")
+                    st.success(f"Signals loaded (endpoint: {sig.get('endpoint_used')}).")
                 except Exception as e:
                     st.error(f"Overpass error: {e}")
+                    st.info("Tip: try again in 10–30 seconds, or reduce radius in Settings.")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -682,7 +701,7 @@ def render_map_signals(cfg: Dict[str, Any]):
 
 def render_events_monitor(cfg: Dict[str, Any]):
     st.subheader("Live Events Monitor (FREE)")
-    st.caption("Legal/free feeds only: GDELT + ReliefWeb. No social media scraping.")
+    st.caption("Free sources only: GDELT + ReliefWeb. Rate limits may apply; retries are enabled.")
 
     colA, colB = st.columns([1.2, 1])
 
@@ -691,8 +710,7 @@ def render_events_monitor(cfg: Dict[str, Any]):
             "Keywords (examples: flood OR cyclone OR bridge collapse OR infrastructure damage)",
             value="flood OR infrastructure damage OR bridge collapse OR cyclone",
         )
-        # HARD cap to avoid 429
-        max_records = st.slider("Max news records", 5, 25, 20, step=5)
+        max_records = st.slider("Max news records", 5, 50, 20, step=5)
 
         if st.button("Fetch latest", type="primary"):
             with st.spinner("Fetching feeds..."):
@@ -719,7 +737,7 @@ def render_events_monitor(cfg: Dict[str, Any]):
         rw = st.session_state.get("relief_df", pd.DataFrame())
         overlay = disaster_overlay_score(gd, rw)
         st.metric("Overlay points", f"{overlay:0.1f} / 15")
-        st.markdown("<div class='small-muted'>This is an additive overlay, not model retraining.</div>", unsafe_allow_html=True)
+        st.markdown("<div class='small-muted'>This is an additive overlay (does not retrain the model).</div>", unsafe_allow_html=True)
         st.session_state["news_overlay"] = overlay
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -750,7 +768,7 @@ def render_combined_risk_panel():
     total_overlay = map_adj + news_overlay
 
     if base_need is None:
-        st.info("Run a single prediction first (Predictor tab). Then come back here for combined view.")
+        st.info("Run a single prediction first (Predictor tab). Then return here for combined view.")
         return
 
     combined = clamp(base_need + total_overlay, 0, 100)
@@ -790,6 +808,7 @@ def render_model_status(cfg: Dict[str, Any]):
         st.write("JOBLIB path:", MODEL_JOBLIB_PATH, "exists:", joblib_ok)
         st.write("onnxruntime available:", ort is not None)
         st.write("joblib available:", joblib is not None)
+        st.write("Overpass endpoints:", OVERPASS_URLS)
         st.write("Features:", FEATURES)
 
 
@@ -819,7 +838,9 @@ def main():
     render_combined_risk_panel()
 
     st.markdown("---")
-    st.caption(f"Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} | Free sources: OSM Overpass + GDELT + ReliefWeb")
+    st.caption(
+        f"Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} | Sources: OSM Overpass + GDELT + ReliefWeb"
+    )
 
 
 if __name__ == "__main__":
