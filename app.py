@@ -1,172 +1,117 @@
+# app.py - STREAMLIT CLOUD SAFE (ONNX MODEL)
 import os
-import joblib
-import requests
+import streamlit as st
 import pandas as pd
 import numpy as np
-import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
+import onnxruntime as ort
+from datetime import datetime
+import requests
 
-st.set_page_config(page_title="🌍 Global Infrastructure AI", page_icon="🌐", layout="wide")
+# -----------------------------
+# Page config
+# -----------------------------
+st.set_page_config(
+    page_title="🌍 Global Infrastructure AI",
+    page_icon="🌐",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-MODEL_PATH = "models/infra_model.joblib"
+# -----------------------------
+# Custom CSS
+# -----------------------------
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        background: linear-gradient(90deg, #1a2980, #26d0ce);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        text-align: center;
+        margin-bottom: 0.5rem;
+        font-weight: 800;
+    }
+    .sub-header {
+        font-size: 1.2rem;
+        color: #cbd5e1;
+        border-left: 5px solid #3498db;
+        padding-left: 12px;
+        margin: 0.8rem 0;
+    }
+    .metric-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 1rem;
+        border-radius: 12px;
+        color: white;
+        box-shadow: 0 5px 18px rgba(0,0,0,0.2);
+        margin: 0.5rem 0;
+    }
+    .prediction-card {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        padding: 1.2rem;
+        border-radius: 12px;
+        color: white;
+        box-shadow: 0 5px 18px rgba(0,0,0,0.2);
+    }
+    .risk-high {
+        background: #ff4d4d;
+        color: white;
+        padding: 6px 12px;
+        border-radius: 8px;
+        font-weight: 800;
+        display: inline-block;
+    }
+    .risk-medium {
+        background: #ffb020;
+        color: black;
+        padding: 6px 12px;
+        border-radius: 8px;
+        font-weight: 800;
+        display: inline-block;
+    }
+    .risk-low {
+        background: #00cc66;
+        color: white;
+        padding: 6px 12px;
+        border-radius: 8px;
+        font-weight: 800;
+        display: inline-block;
+    }
+    .small-note {
+        color: #94a3b8;
+        font-size: 0.9rem;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# -----------------------------
+# Constants
+# -----------------------------
+MODEL_PATH = os.path.join("models", "infra_model.onnx")
 FEATURES = ["Population_Millions", "GDP_per_capita_USD", "HDI_Index", "Urbanization_Rate"]
 
-WB_INDICATORS = {
-    "GDP_per_capita_USD": "NY.GDP.PCAP.CD",
-    "Population_Total": "SP.POP.TOTL",
-    "Urbanization_Rate": "SP.URB.TOTL.IN.ZS",
-    "Electricity_Access": "EG.ELC.ACCS.ZS",
-}
-
-def _wb_latest(country: str, indicator: str):
-    url = f"https://api.worldbank.org/v2/country/{country}/indicator/{indicator}?format=json"
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    if not isinstance(data, list) or len(data) < 2 or not data[1]:
-        return None, None
-    for row in data[1]:
-        if row.get("value") is not None:
-            return float(row["value"]), row.get("date")
-    return None, None
-
-@st.cache_data(ttl=3600)
-def fetch_country_snapshot(country_code: str) -> dict:
-    country_code = country_code.strip().lower()
-    out = {"country_code": country_code.upper()}
-    gdp, gdp_year = _wb_latest(country_code, WB_INDICATORS["GDP_per_capita_USD"])
-    pop, pop_year = _wb_latest(country_code, WB_INDICATORS["Population_Total"])
-    urb, urb_year = _wb_latest(country_code, WB_INDICATORS["Urbanization_Rate"])
-    elec, elec_year = _wb_latest(country_code, WB_INDICATORS["Electricity_Access"])
-
-    out.update({
-        "GDP_per_capita_USD": gdp,
-        "Population_Total": pop,
-        "Urbanization_Rate": urb,
-        "Electricity_Access": elec,
-        "gdp_year": gdp_year,
-        "pop_year": pop_year,
-        "urb_year": urb_year,
-        "elec_year": elec_year,
-    })
-    return out
-
+# -----------------------------
+# Caching
+# -----------------------------
 @st.cache_resource
-def load_model():
+def load_onnx_model():
+    """Load ONNX model (cloud safe)"""
     if not os.path.exists(MODEL_PATH):
-        return None, FEATURES
+        return None
     try:
-        payload = joblib.load(MODEL_PATH)
-        return payload.get("model"), payload.get("features", FEATURES)
+        sess = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
+        return sess
     except Exception as e:
         st.error(f"Model load failed: {e}")
-        return None, FEATURES
+        return None
 
-def risk_badge(p):
-    if p >= 70:
-        return "HIGH", "🔴", "Urgent infrastructure investment needed."
-    if p >= 40:
-        return "MEDIUM", "🟠", "Strategic improvements recommended."
-    return "LOW", "🟢", "Maintain & optimize existing infrastructure."
 
-def main():
-    st.title("🌍 Global Infrastructure AI")
-    st.caption("World Bank indicators + trained ML model. Streamlit Cloud compatible.")
-
-    model, model_features = load_model()
-    if model is None:
-        st.error("Model missing. Upload: models/infra_model.joblib")
-        st.stop()
-
-    tab1, tab2 = st.tabs(["🤖 Predictor", "📊 Explore CSV"])
-
-    with tab1:
-        colA, colB = st.columns([1.3, 1])
-
-        with colA:
-            method = st.radio("Input method:", ["World Bank (country code)", "Manual"], horizontal=True)
-
-            country_data = None
-            hdi = 0.70
-
-            if method == "World Bank (country code)":
-                code = st.text_input("Country code (ISO2/ISO3) e.g., PK, IN, US", value="PK")
-                if st.button("Fetch Real Data"):
-                    try:
-                        snap = fetch_country_snapshot(code)
-                        country_data = snap
-                        st.success("Fetched (cached 1 hour).")
-                        st.json(snap)
-                    except Exception as e:
-                        st.error(f"Fetch failed: {e}")
-
-                hdi = st.slider("HDI Index (manual)", 0.30, 0.99, 0.70, 0.01)
-
-            else:
-                pop_m = st.number_input("Population (Millions)", 0.1, 2500.0, 100.0)
-                gdp = st.number_input("GDP per Capita (USD)", 100.0, 250000.0, 5000.0)
-                hdi = st.slider("HDI Index", 0.30, 0.99, 0.70, 0.01)
-                urb = st.slider("Urbanization Rate (%)", 0.0, 100.0, 50.0)
-
-                country_data = {
-                    "Population_Total": pop_m * 1e6,
-                    "GDP_per_capita_USD": gdp,
-                    "Urbanization_Rate": urb,
-                }
-
-            if st.button("🚀 Predict", type="primary"):
-                if not country_data:
-                    st.warning("Please provide inputs first.")
-                    st.stop()
-
-                pop_total = country_data.get("Population_Total") or 0
-                X = pd.DataFrame([{
-                    "Population_Millions": pop_total / 1e6,
-                    "GDP_per_capita_USD": float(country_data.get("GDP_per_capita_USD") or 0),
-                    "HDI_Index": float(hdi),
-                    "Urbanization_Rate": float(country_data.get("Urbanization_Rate") or 0),
-                }])[model_features]
-
-                proba = float(model.predict_proba(X.values)[0][1] * 100.0)
-                st.session_state["pred"] = {"proba": proba, "X": X}
-
-        with colB:
-            st.subheader("Result")
-            if "pred" in st.session_state:
-                proba = st.session_state["pred"]["proba"]
-                X = st.session_state["pred"]["X"]
-
-                level, emoji, msg = risk_badge(proba)
-                st.metric("Need Probability", f"{proba:.1f}%")
-                st.write(f"**Risk:** {emoji} **{level}**")
-                st.write(msg)
-
-                fig = go.Figure(go.Indicator(
-                    mode="gauge+number",
-                    value=proba,
-                    title={"text": "Infrastructure Need"},
-                    gauge={"axis": {"range": [0, 100]}}
-                ))
-                fig.update_layout(height=250)
-                st.plotly_chart(fig, use_container_width=True)
-
-                df_plot = X.T.reset_index()
-                df_plot.columns = ["feature", "value"]
-                st.plotly_chart(px.bar(df_plot, x="feature", y="value", title="Inputs used"), use_container_width=True)
-            else:
-                st.info("Run a prediction to see output.")
-
-    with tab2:
-        up = st.file_uploader("Upload CSV (optional)", type=["csv"])
-        if up:
-            try:
-                df = pd.read_csv(up)
-                st.dataframe(df.head(100), use_container_width=True)
-                if "GDP_per_capita_USD" in df.columns:
-                    st.plotly_chart(px.histogram(df, x="GDP_per_capita_USD", nbins=50), use_container_width=True)
-            except Exception as e:
-                st.error(f"CSV error: {e}")
-
-if __name__ == "__main__":
-    main()
+@st.cache_data
+def load_default_country_data():
+    """Fallback country dataset (small, safe)"""
+    data = {
+        "Country": ["USA","CHN","IND","DEU","GBR","JPN","BRA","RUS","FRA","ITA","CAN","AUS","KOR","MEX","IDN",
+                    "TUR","SAU","CHE","NLD","ESP","PAK","BGD","NGA","EGY","VNM","THA","ZAF","ARG","COL","MYS"],
+        "Population_Millions": [331,1412,1408,83,68,125,215,144,67,59,38,26,51,129,278,85,36,8.6,17,47,240]()_
