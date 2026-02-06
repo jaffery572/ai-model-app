@@ -6,4 +6,5 @@ scikit-learn==1.4.2
 joblib==1.4.2
 requests==2.32.3
 skl2onnx==1.16.0
-onnxruntime==1.17.3
+onnx==1.16.0
+onnxruntime==1.24.1
