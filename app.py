@@ -1,3 +1,4 @@
+import os
 import time
 from datetime import datetime
 
@@ -29,6 +30,7 @@ from utils import (
     build_analyst_context,
     analyst_reply,
 )
+
 
 EVENTS_COOLDOWN_SECONDS = 45
 
