@@ -606,7 +606,7 @@ def main():
     st.session_state["debug"] = st.sidebar.toggle("Show debug info", value=False)
 
     st.sidebar.markdown("---")
-    st.sidebar.caption("Model load is safe. If it fails, app still runs with heuristic predictions.")
+    st.sidebar.caption("Model load is safe.")
 
     # Resolve model
     model_kind, model_obj, feature_list, model_path = resolve_model()
