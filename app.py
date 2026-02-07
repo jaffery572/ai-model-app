@@ -400,14 +400,23 @@ def render_hazard_overlays():
     with col2:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown("### Weather (Open-Meteo)")
-        if st.button("Refresh Weather", use_container_width=True):
-            with st.spinner("Fetching weather..."):
-                j, err = fetch_open_meteo(lat, lon)
-                st.session_state["meteo_json"] = j
-                st.session_state["meteo_err"] = err
-                pts, summary = open_meteo_overlay_points(j)
-                st.session_state["meteo_pts"] = float(pts)
-                st.session_state["meteo_summary"] = summary
+        now = time.time()
+last = st.session_state.get("meteo_last_call", 0.0)
+cooldown_s = 25
+
+can_call = (now - last) > cooldown_s
+label = "Refresh Weather" if can_call else f"Refresh Weather (wait {int(cooldown_s - (now-last))}s)"
+
+if st.button(label, use_container_width=True, disabled=not can_call):
+    st.session_state["meteo_last_call"] = now
+    with st.spinner("Fetching weather..."):
+        j, err = fetch_open_meteo(lat, lon)
+        st.session_state["meteo_json"] = j
+        st.session_state["meteo_err"] = err
+        pts2, summary = open_meteo_overlay_points(j)
+        st.session_state["meteo_pts"] = float(pts2)
+        st.session_state["meteo_summary"] = summary
+
         pts = float(st.session_state.get("meteo_pts", 0.0))
         st.metric("Overlay points", f"{pts:0.1f} / 6")
         if st.session_state.get("meteo_err"):
