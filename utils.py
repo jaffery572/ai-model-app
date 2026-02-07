@@ -1,6 +1,7 @@
 import os
 import time
 import math
+import json
 from typing import Dict, Any, Tuple, Optional, List
 
 import numpy as np
@@ -37,7 +38,7 @@ OVERPASS_ENDPOINTS = [
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 RELIEFWEB_URL = "https://api.reliefweb.int/v1/reports"
 
-# New FREE feeds
+# FREE hazard feeds
 USGS_EQ_URL = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson"
 EONET_EVENTS_URL = "https://eonet.gsfc.nasa.gov/api/v3/events"
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
@@ -235,6 +236,20 @@ def model_predict_need(features_row: np.ndarray) -> Tuple[float, str]:
 
 
 # -----------------------------
+# Geo distance helper
+# -----------------------------
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    R = 6371.0
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2) + math.cos(p1) * math.cos(p2) * (math.sin(dlon / 2) ** 2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
+
+
+# -----------------------------
 # Overpass signals (multi-endpoint)
 # -----------------------------
 def overpass_query(lat: float, lon: float, radius_m: int) -> str:
@@ -319,6 +334,164 @@ def map_context_adjustment(signals: Dict[str, Any]) -> float:
     infra_density = (min(roads, 2000) / 2000.0) * 0.6 + (min(key_pois, 80) / 80.0) * 0.4
     adj = (0.35 - infra_density) * 45.0
     return clamp(adj, -10.0, 15.0)
+
+
+# -----------------------------
+# Offline GeoJSON signals (UPLOAD)
+# -----------------------------
+def parse_geojson_bytes(file_bytes: bytes) -> Tuple[Optional[dict], str]:
+    try:
+        txt = file_bytes.decode("utf-8", errors="ignore")
+        j = json.loads(txt)
+        if not isinstance(j, dict) or j.get("type") not in ("FeatureCollection", "Feature"):
+            return None, "Invalid GeoJSON: expected FeatureCollection."
+        return j, "OK"
+    except Exception as e:
+        return None, f"Invalid GeoJSON: {e}"
+
+
+def _iter_features(geojson: dict) -> List[dict]:
+    if geojson.get("type") == "Feature":
+        return [geojson]
+    feats = geojson.get("features") or []
+    return feats if isinstance(feats, list) else []
+
+
+def _coords_from_geometry(geom: dict) -> List[Tuple[float, float]]:
+    """
+    Returns list of (lat, lon) points extracted from Point/LineString/MultiLineString/MultiPoint.
+    """
+    if not geom or not isinstance(geom, dict):
+        return []
+    gtype = geom.get("type")
+    coords = geom.get("coordinates")
+
+    pts: List[Tuple[float, float]] = []
+
+    def add_point(c):
+        try:
+            lon, lat = float(c[0]), float(c[1])
+            pts.append((lat, lon))
+        except Exception:
+            pass
+
+    if gtype == "Point" and isinstance(coords, list) and len(coords) >= 2:
+        add_point(coords)
+
+    elif gtype == "MultiPoint" and isinstance(coords, list):
+        for c in coords:
+            if isinstance(c, list) and len(c) >= 2:
+                add_point(c)
+
+    elif gtype == "LineString" and isinstance(coords, list):
+        for c in coords:
+            if isinstance(c, list) and len(c) >= 2:
+                add_point(c)
+
+    elif gtype == "MultiLineString" and isinstance(coords, list):
+        for line in coords:
+            if isinstance(line, list):
+                for c in line:
+                    if isinstance(c, list) and len(c) >= 2:
+                        add_point(c)
+
+    return pts
+
+
+def offline_signals_within_radius(
+    roads_geojson: Optional[dict],
+    pois_geojson: Optional[dict],
+    lat: float,
+    lon: float,
+    radius_m: int,
+) -> Dict[str, Any]:
+    """
+    Counts features within radius using vertex/point proximity (lightweight approximation).
+    """
+    radius_km = float(radius_m) / 1000.0
+
+    out = {
+        "radius_m": int(radius_m),
+        "roads_features_near": 0,
+        "poi_points_near": 0,
+        "hospitals_near": 0,
+        "schools_near": 0,
+        "clinics_near": 0,
+        "power_near": 0,
+        "water_near": 0,
+        "emergency_near": 0,
+    }
+
+    # Roads: count a road feature if ANY vertex falls within radius
+    if roads_geojson:
+        for f in _iter_features(roads_geojson):
+            geom = (f.get("geometry") or {})
+            pts = _coords_from_geometry(geom)
+            hit = False
+            for (plat, plon) in pts:
+                if haversine_km(lat, lon, plat, plon) <= radius_km:
+                    hit = True
+                    break
+            if hit:
+                out["roads_features_near"] += 1
+
+    # POIs: count points within radius; classify by properties if available
+    if pois_geojson:
+        for f in _iter_features(pois_geojson):
+            geom = (f.get("geometry") or {})
+            pts = _coords_from_geometry(geom)
+            if not pts:
+                continue
+            # Use first point for POI distance
+            plat, plon = pts[0]
+            if haversine_km(lat, lon, plat, plon) <= radius_km:
+                out["poi_points_near"] += 1
+                props = f.get("properties") or {}
+                # Try common OSM tags: amenity, power, man_made, emergency
+                amenity = str(props.get("amenity", "")).lower()
+                man_made = str(props.get("man_made", "")).lower()
+                power = str(props.get("power", "")).lower()
+                emergency = str(props.get("emergency", "")).lower()
+
+                if amenity == "hospital":
+                    out["hospitals_near"] += 1
+                elif amenity == "school":
+                    out["schools_near"] += 1
+                elif amenity == "clinic":
+                    out["clinics_near"] += 1
+
+                if power:
+                    out["power_near"] += 1
+                if man_made == "water_tower":
+                    out["water_near"] += 1
+                if emergency:
+                    out["emergency_near"] += 1
+
+    # Clamp a bit for sanity
+    out["roads_features_near"] = int(min(out["roads_features_near"], 50000))
+    out["poi_points_near"] = int(min(out["poi_points_near"], 50000))
+    return out
+
+
+def offline_overlay_points(offline_sig: Dict[str, Any]) -> float:
+    """
+    0..10 overlay points from offline map density (lower density => higher overlay).
+    This is an "environment coverage" overlay, not a hazard overlay.
+    """
+    if not offline_sig:
+        return 0.0
+
+    roads = float(offline_sig.get("roads_features_near", 0))
+    pois = float(offline_sig.get("poi_points_near", 0))
+
+    # Normalize around typical values
+    roads_norm = min(roads, 2000.0) / 2000.0
+    pois_norm = min(pois, 300.0) / 300.0
+    density = 0.7 * roads_norm + 0.3 * pois_norm
+
+    # If density is low -> add overlay (up to 10). If high -> near 0.
+    pts = (0.45 - density) * 22.0
+    return clamp(pts, 0.0, 10.0)
 
 
 # -----------------------------
@@ -416,19 +589,8 @@ def disaster_overlay_score(gdelt_df: pd.DataFrame, relief_df: pd.DataFrame) -> f
 
 
 # -----------------------------
-# NEW: USGS earthquakes (free)
+# USGS earthquakes (free)
 # -----------------------------
-def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    R = 6371.0
-    p1 = math.radians(lat1)
-    p2 = math.radians(lat2)
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = (math.sin(dlat / 2) ** 2) + math.cos(p1) * math.cos(p2) * (math.sin(dlon / 2) ** 2)
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return R * c
-
-
 def fetch_usgs_earthquakes_near(lat: float, lon: float, radius_km: float = 300.0) -> Tuple[pd.DataFrame, Optional[str]]:
     j, err, code = request_json("GET", USGS_EQ_URL, timeout=20, max_retries=3)
     if j is None:
@@ -445,11 +607,10 @@ def fetch_usgs_earthquakes_near(lat: float, lon: float, radius_km: float = 300.0
         eq_lon, eq_lat = float(coords[0]), float(coords[1])
         dist = haversine_km(lat, lon, eq_lat, eq_lon)
         if dist <= radius_km:
-            mag = props.get("mag")
             rows.append({
                 "time": props.get("time"),
                 "place": props.get("place"),
-                "mag": mag,
+                "mag": props.get("mag"),
                 "url": props.get("url"),
                 "distance_km": dist,
             })
@@ -462,9 +623,6 @@ def fetch_usgs_earthquakes_near(lat: float, lon: float, radius_km: float = 300.0
 
 
 def usgs_overlay_points(eq_df: pd.DataFrame) -> float:
-    """
-    0..8 overlay points based on nearby quakes (last day feed).
-    """
     if eq_df is None or not isinstance(eq_df, pd.DataFrame) or eq_df.empty:
         return 0.0
 
@@ -488,7 +646,7 @@ def usgs_overlay_points(eq_df: pd.DataFrame) -> float:
 
 
 # -----------------------------
-# NEW: Open-Meteo (free)
+# Open-Meteo (free)
 # -----------------------------
 def fetch_open_meteo(lat: float, lon: float) -> Tuple[Optional[dict], Optional[str]]:
     params = {
@@ -515,10 +673,6 @@ def fetch_open_meteo(lat: float, lon: float) -> Tuple[Optional[dict], Optional[s
 
 
 def open_meteo_overlay_points(meteo_json: Optional[dict]) -> Tuple[float, Dict[str, Any]]:
-    """
-    0..6 overlay points from heavy rain / strong wind heuristic.
-    Also returns a small summary dict.
-    """
     if not meteo_json:
         return 0.0, {}
 
@@ -571,7 +725,7 @@ def open_meteo_overlay_points(meteo_json: Optional[dict]) -> Tuple[float, Dict[s
 
 
 # -----------------------------
-# NEW: NASA EONET (free)
+# NASA EONET (free)
 # -----------------------------
 def fetch_eonet_events_near(lat: float, lon: float, radius_km: float = 500.0, limit: int = 30) -> Tuple[pd.DataFrame, Optional[str]]:
     params = {"status": "open", "limit": int(limit)}
@@ -624,9 +778,6 @@ def fetch_eonet_events_near(lat: float, lon: float, radius_km: float = 500.0, li
 
 
 def eonet_overlay_points(eo_df: pd.DataFrame) -> float:
-    """
-    0..6 overlay points based on number + category rough weighting.
-    """
     if eo_df is None or not isinstance(eo_df, pd.DataFrame) or eo_df.empty:
         return 0.0
 
@@ -646,372 +797,291 @@ def eonet_overlay_points(eo_df: pd.DataFrame) -> float:
 
 
 # -----------------------------
-# NEW: Detailed Recommendations + Evidence + Report
+# Evidence + confidence + limitations
 # -----------------------------
-def _confidence_and_limitations(base_need: float, overlays: Dict[str, float], model_kind: str, signals_used: Dict[str, bool]) -> Tuple[str, List[str]]:
+def compute_confidence(
+    model_kind: str,
+    base_need: float,
+    overlays: Dict[str, float],
+    has_location: bool,
+    has_offline_map: bool,
+) -> Tuple[float, List[str]]:
     """
-    Returns: (confidence_label, limitations_list)
-    Confidence is heuristic (not statistical), based on model availability + signal coverage.
+    Returns (confidence_0_1, limitations[])
+    Confidence is a heuristic meant for readability, not a statistical guarantee.
     """
-    coverage = 0
-    if signals_used.get("map"):
-        coverage += 1
-    if signals_used.get("news"):
-        coverage += 1
-    if signals_used.get("usgs"):
-        coverage += 1
-    if signals_used.get("weather"):
-        coverage += 1
-    if signals_used.get("eonet"):
-        coverage += 1
+    limitations: List[str] = []
 
-    # Model quality assumption
+    # Base confidence by model type
     if model_kind == "onnx":
-        base_conf = 0.70
+        conf = 0.78
     elif model_kind == "joblib":
-        base_conf = 0.60
+        conf = 0.72
+        limitations.append("Joblib models can be sensitive to environment/version differences on cloud.")
     else:
-        base_conf = 0.45  # heuristic-only
+        conf = 0.60
+        limitations.append("Fallback scoring was used (heuristic), not a trained model output.")
 
-    conf = base_conf + min(0.20, coverage * 0.05)
+    # Signal availability
+    sig_strength = 0.0
+    for k, v in (overlays or {}).items():
+        if abs(float(v)) > 0.01:
+            sig_strength += 1.0
 
-    # Penalty when overlays dominate
-    overlay_total = float(sum([abs(v) for v in overlays.values()]))
-    if overlay_total > 20:
-        conf -= 0.08
-    if overlay_total > 35:
-        conf -= 0.10
+    conf += min(0.10, sig_strength * 0.02)
 
-    conf = clamp(conf, 0.25, 0.90)
+    if not has_location:
+        limitations.append("No map location selected, so hazard overlays (USGS/Open-Meteo/EONET) are zero.")
 
-    if conf >= 0.78:
-        label = "High"
-    elif conf >= 0.62:
-        label = "Medium"
-    else:
-        label = "Low"
+    if not has_offline_map:
+        limitations.append("Offline map overlay is not included unless GeoJSON files are uploaded.")
 
-    limitations = [
-        "This score is an indicator-level estimate; it is not an engineering assessment of specific assets.",
-        "OpenStreetMap/Overpass data may be incomplete or temporarily rate-limited; counts are approximate.",
-        "News/relief feeds reflect media/reporting volume and may be biased by coverage and language.",
-        "Hazard feeds (USGS/EONET/Open-Meteo) are near-real-time snapshots; conditions can change quickly.",
-        "The overlays are heuristic adjustments, not causal proof of damage or infrastructure failure.",
-        "Use this report to prioritize follow-up inspections, audits, and local authority coordination.",
-    ]
+    # Score extremes can be less stable (heuristic)
+    if base_need < 10 or base_need > 90:
+        limitations.append("Very low/high scores can be less stable without ground-truth local asset condition data.")
+        conf -= 0.03
 
-    return label, limitations
+    # Clamp
+    conf = clamp(conf, 0.45, 0.90)
+
+    # General limitations
+    limitations.append("This is a decision-support signal; it does not replace engineering inspection or official warnings.")
+    limitations.append("Live feeds may be rate-limited; missing items reduce coverage but the app still runs.")
+
+    # De-duplicate
+    seen = set()
+    clean = []
+    for x in limitations:
+        if x not in seen:
+            seen.add(x)
+            clean.append(x)
+
+    return conf, clean
 
 
+def build_evidence_links(
+    gdelt_df: Optional[pd.DataFrame],
+    relief_df: Optional[pd.DataFrame],
+    usgs_df: Optional[pd.DataFrame],
+    eonet_df: Optional[pd.DataFrame],
+    max_items: int = 6,
+) -> Dict[str, List[Dict[str, str]]]:
+    def take_links(df: Optional[pd.DataFrame], title_col: str, url_col: str, date_col: str) -> List[Dict[str, str]]:
+        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+            return []
+        out = []
+        for _, r in df.head(max_items).iterrows():
+            t = str(r.get(title_col, "")).strip()
+            u = str(r.get(url_col, "")).strip()
+            d = str(r.get(date_col, "")).strip()
+            if u:
+                out.append({"title": t[:180], "url": u, "date": d[:60]})
+        return out
+
+    return {
+        "GDELT": take_links(gdelt_df, "title", "url", "seendate"),
+        "ReliefWeb": take_links(relief_df, "title", "url", "date"),
+        "USGS": take_links(usgs_df, "place", "url", "time"),
+        "EONET": take_links(eonet_df, "title", "url", "date"),
+    }
+
+
+# -----------------------------
+# Detailed recommendations + report markdown
+# -----------------------------
 def recommendations_detailed(
     *,
     base_need: float,
     overlays: Dict[str, float],
     inputs: Dict[str, Any],
     map_signals: Optional[Dict[str, Any]] = None,
-    evidence: Optional[Dict[str, Any]] = None,
-    model_kind: str = "onnx",
+    offline_signals: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """
-    Returns a structured plan with:
-      - summary (immediate actions, context reasons)
-      - items (each: why, data_gathered, steps, deliverables)
-      - evidence (dataframes for link rendering + snapshots)
-      - confidence + limitations
-    """
-    evidence = evidence or {}
+    total_overlay = sum(float(v) for v in (overlays or {}).values())
+    combined = clamp(base_need + total_overlay, 0, 100)
 
-    combined = clamp(base_need + sum(overlays.values()), 0, 100)
     risk, _ = risk_bucket(combined)
 
-    # Signals used
-    signals_used = {
-        "map": bool(map_signals),
-        "news": float(overlays.get("events", 0.0)) != 0.0,
-        "usgs": float(overlays.get("usgs", 0.0)) != 0.0,
-        "weather": float(overlays.get("weather", 0.0)) != 0.0,
-        "eonet": float(overlays.get("eonet", 0.0)) != 0.0,
-    }
-    confidence_label, limitations = _confidence_and_limitations(base_need, overlays, model_kind, signals_used)
-
-    # Context reasons (readable drivers)
     reasons = []
-    try:
-        gdp = float(inputs.get("GDP_per_capita_USD", 0))
-        hdi = float(inputs.get("HDI_Index", 0))
-        urb = float(inputs.get("Urbanization_Rate", 0))
-        pop = float(inputs.get("Population_Millions", 0))
+    gdp = safe_float(inputs.get("GDP_per_capita_USD"))
+    hdi = safe_float(inputs.get("HDI_Index"))
+    urb = safe_float(inputs.get("Urbanization_Rate"))
+    pop = safe_float(inputs.get("Population_Millions"))
 
-        if gdp < 5000:
-            reasons.append("Low GDP per capita increases capital constraints and raises infrastructure backlog risk.")
-        elif gdp < 12000:
-            reasons.append("Moderate GDP per capita suggests selective investment capacity but still potential gaps.")
+    if not np.isnan(gdp) and gdp < 5000:
+        reasons.append("Low GDP per capita increases constraints on asset maintenance and expansion.")
+    if not np.isnan(hdi) and hdi < 0.70:
+        reasons.append("Lower HDI often correlates with gaps in basic services and resilience capacity.")
+    if not np.isnan(urb) and urb < 50 and not np.isnan(pop) and pop > 50:
+        reasons.append("Large population with low urbanization can increase strain on distributed infrastructure delivery.")
+
+    # Overlay drivers (readable)
+    ov_reasons = []
+    for k, v in (overlays or {}).items():
+        v = float(v)
+        if abs(v) < 0.01:
+            continue
+        label = {
+            "map": "OpenStreetMap live signals",
+            "events": "News & disaster reports",
+            "usgs": "Earthquake activity (USGS)",
+            "weather": "Weather stress (Open-Meteo)",
+            "eonet": "Active hazards (NASA EONET)",
+            "offline_map": "Offline map environment signals",
+        }.get(k, k)
+        if v > 0:
+            ov_reasons.append(f"{label} increased risk by +{v:0.1f} points.")
         else:
-            reasons.append("Higher GDP per capita usually supports maintenance and faster upgrades (lower baseline risk).")
+            ov_reasons.append(f"{label} reduced risk by {v:0.1f} points.")
 
-        if hdi < 0.70:
-            reasons.append("Lower HDI correlates with service access gaps (health, utilities, transport).")
-        elif hdi < 0.80:
-            reasons.append("Mid-range HDI suggests mixed service quality and uneven regional coverage.")
-        else:
-            reasons.append("High HDI typically aligns with better service coverage and resilience capacity.")
+    # Plan items (client-ready)
+    items: List[Dict[str, Any]] = []
 
-        if urb > 70:
-            reasons.append("High urbanization increases load on roads, water, and power networks (maintenance pressure).")
-        elif urb < 40 and pop > 50:
-            reasons.append("Low urbanization + large population often indicates dispersed service delivery challenges.")
-        else:
-            reasons.append("Urbanization level suggests standard planning demands on public services.")
+    def add_item(title: str, why: List[str], data_gathered: List[str], steps: List[str], deliverables: List[str]):
+        items.append({
+            "title": title,
+            "why": why,
+            "data_gathered": data_gathered,
+            "steps": steps,
+            "deliverables": deliverables,
+        })
 
-        if pop > 150 and gdp < 6000:
-            reasons.append("Large population with low GDP per capita increases demand pressure with limited funding.")
-    except Exception:
-        reasons.append("Indicator drivers could not be fully computed due to missing inputs.")
-
-    # Map signals notes
-    map_notes = []
+    # Common data gathered
+    dg_common = [
+        "Country-level indicators (Population, GDP per capita, HDI, Urbanization).",
+        "Risk overlays from free feeds (news/reports, hazards, weather) when available.",
+    ]
     if map_signals:
-        roads = map_signals.get("roads")
-        hospitals = map_signals.get("hospitals")
-        schools = map_signals.get("schools")
-        power = map_signals.get("power")
-        water = map_signals.get("water")
-        map_notes.append(f"Nearby roads count: {roads}")
-        map_notes.append(f"Hospitals: {hospitals}, Schools: {schools}, Power nodes: {power}, Water towers: {water}")
+        dg_common.append("Live local infrastructure counts from OpenStreetMap Overpass around selected point.")
+    if offline_signals:
+        dg_common.append("Uploaded offline map (GeoJSON) feature density around selected point.")
 
-    # Immediate actions (based on risk)
     if combined >= 70:
-        immediate = [
-            "Initiate a 72-hour critical infrastructure condition check (roads, bridges, power, water, hospitals).",
-            "Stand up an incident coordination cell (operations + utilities + public safety) with daily reporting.",
-            "Confirm backup power readiness for hospitals and water pumping stations (fuel + load tests).",
-            "Prioritize drainage, culverts, embankments, and known flood bottlenecks for rapid clearance.",
-        ]
+        add_item(
+            "Critical infrastructure rapid assessment (0–7 days)",
+            [
+                "High combined risk suggests priority exposure of essential services (health, power, transport, water).",
+                "Early detection prevents cascading failures (e.g., power outage → water pumping failure).",
+            ],
+            dg_common + [
+                "Overlay drivers: " + ("; ".join(ov_reasons) if ov_reasons else "No active overlays applied."),
+            ],
+            [
+                "Define the critical asset list (bridges, substations, water plants, hospitals, evacuation routes).",
+                "Run a quick condition scoring: access, structural signs, outages, bottlenecks, spare parts.",
+                "Assign owners and response SLAs for each asset category (power/water/roads/health).",
+                "Set a 7-day action board with daily status checks and escalation rules.",
+            ],
+            [
+                "Critical asset inventory (CSV/Sheet) with condition score and owner.",
+                "7-day response plan with SLAs and escalation matrix.",
+                "Map of critical routes + chokepoints (for logistics planning).",
+            ],
+        )
+        add_item(
+            "Emergency maintenance & continuity planning (0–30 days)",
+            [
+                "When hazard/news overlays are elevated, continuity planning reduces downtime and losses.",
+                "Contractor readiness + spare stock often determines recovery speed.",
+            ],
+            dg_common,
+            [
+                "Pre-negotiate contractor call-outs and define scope templates (roads, drainage, power).",
+                "Create spare parts & fuel lists (generators, pumps, transformers, bridge components).",
+                "Validate backup power availability for healthcare/water pumping sites.",
+                "Run a tabletop exercise for flood/wind/quake scenarios with communications plan.",
+            ],
+            [
+                "Continuity plan (PDF/MD) with contact tree and contractor scope templates.",
+                "Spare parts & resource checklist with quantities and storage points.",
+                "Scenario playbook (flood/wind/earthquake) with triggers and actions.",
+            ],
+        )
     elif combined >= 40:
-        immediate = [
-            "Create a prioritized inspection list for high-traffic corridors and utility bottlenecks.",
-            "Review preventive maintenance schedule and tighten inspection frequency for at-risk assets.",
-            "Prepare a quick-response contractor roster and material stock list.",
-        ]
+        add_item(
+            "Targeted resilience upgrades (30–180 days)",
+            [
+                "Medium risk benefits most from targeted upgrades rather than full rebuilds.",
+                "Reducing single points of failure improves service reliability.",
+            ],
+            dg_common + [
+                "Focus areas: drainage, road bottlenecks, distribution reliability, healthcare access.",
+            ],
+            [
+                "Rank assets by criticality + exposure (population served, hazard proximity, redundancy).",
+                "Prioritize 10–20 quick wins: drainage cleaning, culvert expansion, slope protection, backup power.",
+                "Schedule periodic inspections and preventive maintenance with reporting templates.",
+                "Introduce low-cost monitoring: checklists + photo logs + monthly review.",
+            ],
+            [
+                "Prioritized backlog (Top 20) with cost bands and expected impact.",
+                "Maintenance calendar and inspection templates.",
+                "Resilience quick-win package list ready for procurement.",
+            ],
+        )
     else:
-        immediate = [
-            "Maintain preventive maintenance and routine inspections with standardized checklists.",
-            "Build/refresh an asset inventory with condition scoring and repair backlog tracking.",
-            "Add low-cost monitoring (weekly reporting + incident log + periodic audits).",
-        ]
+        add_item(
+            "Preventive maintenance & monitoring (ongoing)",
+            [
+                "Low combined risk still requires maintenance to avoid silent degradation.",
+                "Small improvements now prevent major rehab later.",
+            ],
+            dg_common,
+            [
+                "Maintain a basic asset registry (location, age, last inspection, condition score).",
+                "Implement routine inspections for bridges, drainage, substations, key roads.",
+                "Create incident reporting for outages and road closures (simple form + log).",
+                "Review seasonal weather readiness and update response SOPs.",
+            ],
+            [
+                "Asset registry (CSV/Sheet) with inspection history.",
+                "Maintenance SOPs and monthly reporting dashboard.",
+                "Seasonal preparedness checklist and response SOP document.",
+            ],
+        )
 
-    # Detailed plan items
-    items = []
-
-    items.append({
-        "title": "1) Asset inventory & condition scoring (foundation)",
-        "why": [
-            "Without a complete asset list, upgrades become reactive and funding allocation is inefficient.",
-            "A condition score enables prioritization and accountability.",
+    # Summary block
+    summary = {
+        "risk_level": risk,
+        "combined_need": float(combined),
+        "base_need": float(base_need),
+        "overlay_total": float(total_overlay),
+        "context_reasons": reasons + ov_reasons,
+        "immediate_actions": [
+            "Select a map location and refresh overlays (USGS/Open-Meteo/EONET/news) for best coverage.",
+            "Download the client-ready report and use it as an action tracker.",
         ],
-        "data_gathered": [
-            "Input indicators (GDP/HDI/Urbanization/Population).",
-            "Map-based infrastructure density signals (if available).",
-        ] + (map_notes if map_notes else ["Map signals not available; using indicators only."]),
-        "steps": [
-            "List critical assets by category: roads, bridges, water, power, hospitals, schools.",
-            "Assign condition scoring (1–5) using rapid field survey templates.",
-            "Create a backlog list with: issue type, severity, estimated cost, and deadline.",
-            "Set a monthly review cycle and track progress in a simple dashboard/spreadsheet.",
-        ],
-        "deliverables": [
-            "Asset register (CSV/Sheet) with condition score and owner.",
-            "Criticality matrix (high/medium/low) and prioritized backlog list.",
-        ],
-    })
-
-    items.append({
-        "title": "2) Resilience upgrades (utilities + transport)",
-        "why": [
-            "Utilities and transport failures cause cascading disruption (health access, supply chain, safety).",
-            "Redundancy and maintenance are often the cheapest risk reducers.",
-        ],
-        "data_gathered": [
-            "Hazard overlays (USGS/Open-Meteo/EONET) and news signals (if refreshed).",
-            f"Overlay totals: map={overlays.get('map', 0):+.1f}, events={overlays.get('events', 0):+.1f}, "
-            f"usgs={overlays.get('usgs', 0):+.1f}, weather={overlays.get('weather', 0):+.1f}, eonet={overlays.get('eonet', 0):+.1f}",
-        ],
-        "steps": [
-            "Identify single points of failure: substations, trunk mains, bridges, main corridors.",
-            "Add redundancy where possible: alternate feeders, bypass valves, backup generators.",
-            "Implement preventive maintenance triggers (threshold-based) for high-risk assets.",
-            "Run tabletop exercises for disruption scenarios (flood, quake, storm).",
-        ],
-        "deliverables": [
-            "Resilience improvement plan with cost tiers (low/medium/high).",
-            "Maintenance SOP + trigger thresholds + escalation contacts.",
-        ],
-    })
-
-    items.append({
-        "title": "3) Emergency readiness & response workflow",
-        "why": [
-            "Fast coordination reduces downtime and secondary damage.",
-            "Clear responsibilities prevent delays during incidents.",
-        ],
-        "data_gathered": [
-            "Live event feeds (GDELT/ReliefWeb) and hazards (USGS/EONET/Open-Meteo) when available.",
-            "Known high-risk drivers from indicators and infrastructure density signals.",
-        ],
-        "steps": [
-            "Define incident roles (lead, comms, utilities liaison, field ops, procurement).",
-            "Create a rapid assessment checklist (first 6 hours, 24 hours, 72 hours).",
-            "Pre-position critical spares: pumps, generators, repair kits, temporary bridges/barriers.",
-            "Set public communication templates and update cycles.",
-        ],
-        "deliverables": [
-            "Emergency playbook (PDF/MD) and checklists for field teams.",
-            "Resource & contractor roster with 24/7 contact details.",
-        ],
-    })
-
-    # Evidence package (for report links)
-    plan = {
-        "meta": {
-            "risk_level": risk,
-            "base_need": float(base_need),
-            "combined_need": float(combined),
-            "model_kind": model_kind,
-            "overlays": {k: float(v) for k, v in overlays.items()},
-        },
-        "summary": {
-            "confidence": confidence_label,
-            "immediate_actions": immediate,
-            "context_reasons": reasons,
-        },
-        "items": items,
-        "evidence": {
-            "map_signals": map_signals or {},
-            "gdelt_df": evidence.get("gdelt_df"),
-            "relief_df": evidence.get("relief_df"),
-            "usgs_df": evidence.get("usgs_df"),
-            "eonet_df": evidence.get("eonet_df"),
-            "meteo_summary": evidence.get("meteo_summary") or {},
-        },
-        "limitations": limitations,
     }
-    return plan
+
+    return {"summary": summary, "items": items}
 
 
 def render_plan_markdown(plan: Dict[str, Any]) -> str:
-    """
-    Client-ready markdown report with:
-      - summary, confidence, limitations
-      - readable evidence section
-      - evidence links (GDELT/ReliefWeb/USGS/EONET)
-    """
-    meta = plan.get("meta", {})
-    summary = plan.get("summary", {})
-    items = plan.get("items", [])
-    evidence = plan.get("evidence", {})
-    limitations = plan.get("limitations", [])
+    s = plan.get("summary", {}) or {}
+    items = plan.get("items", []) or []
 
     lines: List[str] = []
     lines.append("# Infrastructure Risk Report")
     lines.append("")
-    lines.append(f"**Risk level:** {meta.get('risk_level', 'N/A')}")
-    lines.append(f"**Base need (model):** {float(meta.get('base_need', 0.0)):.1f}%")
-    lines.append(f"**Combined need:** {float(meta.get('combined_need', 0.0)):.1f}%")
-    lines.append(f"**Model kind:** {meta.get('model_kind', 'N/A')}")
-    lines.append("")
-    lines.append("## Confidence")
-    lines.append(f"- **Confidence:** {summary.get('confidence', 'N/A')}")
-    lines.append("- Confidence is a heuristic based on model availability and signal coverage (not a statistical guarantee).")
+    lines.append(f"**Risk level:** {s.get('risk_level', 'N/A')}")
+    lines.append(f"**Base need:** {s.get('base_need', 0):0.1f}%")
+    lines.append(f"**Overlay total:** {s.get('overlay_total', 0):+0.1f}")
+    lines.append(f"**Combined need:** {s.get('combined_need', 0):0.1f}%")
     lines.append("")
 
-    lines.append("## Immediate actions")
-    for a in summary.get("immediate_actions", []):
-        lines.append(f"- {a}")
-    lines.append("")
-
-    lines.append("## Why this score (key drivers)")
-    for r in summary.get("context_reasons", []):
+    lines.append("## Evidence (readable)")
+    for r in (s.get("context_reasons") or [])[:12]:
         lines.append(f"- {r}")
     lines.append("")
 
-    lines.append("## Overlay breakdown")
-    overlays = meta.get("overlays", {}) or {}
-    lines.append(f"- Map adjustment: {float(overlays.get('map', 0.0)):+.1f}")
-    lines.append(f"- News/Reports: {float(overlays.get('events', 0.0)):+.1f}")
-    lines.append(f"- USGS earthquakes: {float(overlays.get('usgs', 0.0)):+.1f}")
-    lines.append(f"- Weather (Open-Meteo): {float(overlays.get('weather', 0.0)):+.1f}")
-    lines.append(f"- NASA EONET hazards: {float(overlays.get('eonet', 0.0)):+.1f}")
-    lines.append("")
-
-    lines.append("## Evidence (readable snapshot)")
-    map_sig = evidence.get("map_signals") or {}
-    if map_sig:
-        lines.append("### Map signals (OpenStreetMap/Overpass)")
-        for k, v in map_sig.items():
-            lines.append(f"- {k}: {v}")
-        lines.append("")
-    else:
-        lines.append("- Map signals not available.")
-        lines.append("")
-
-    meteo = evidence.get("meteo_summary") or {}
-    if meteo:
-        lines.append("### Weather snapshot (Open-Meteo, UTC)")
-        for k, v in meteo.items():
-            lines.append(f"- {k}: {v}")
-        lines.append("")
-
-    # ---- Evidence links (clickable)
-    lines.append("## Evidence links (sources)")
-    links_added = False
-
-    def _add_links_from_df(df: Any, label: str, title_col: str = "title", url_col: str = "url", max_items: int = 12):
-        nonlocal links_added
-        try:
-            if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-                lines.append(f"- {label}: _No items available._")
-                return
-
-            lines.append(f"### {label}")
-            n = 0
-            for _, r in df.iterrows():
-                if n >= max_items:
-                    break
-                t = str(r.get(title_col, "") or "").strip()
-                u = str(r.get(url_col, "") or "").strip()
-                if not u:
-                    continue
-                if not t:
-                    t = u
-                if len(t) > 120:
-                    t = t[:117] + "..."
-                lines.append(f"- [{t}]({u})")
-                n += 1
-
-            if n == 0:
-                lines.append("- _No valid links found in feed._")
-            links_added = True
-            lines.append("")
-        except Exception:
-            lines.append(f"- {label}: _Could not render links._")
-
-    gdelt_df = evidence.get("gdelt_df")
-    relief_df = evidence.get("relief_df")
-    usgs_df = evidence.get("usgs_df")
-    eonet_df = evidence.get("eonet_df")
-
-    _add_links_from_df(gdelt_df, "GDELT (news)", title_col="title", url_col="url", max_items=12)
-    _add_links_from_df(relief_df, "ReliefWeb (disaster reports)", title_col="title", url_col="url", max_items=12)
-    _add_links_from_df(usgs_df, "USGS (earthquakes)", title_col="place", url_col="url", max_items=12)
-    _add_links_from_df(eonet_df, "NASA EONET (hazards)", title_col="title", url_col="url", max_items=12)
-
-    if not links_added:
-        lines.append("_No evidence links available. Try refreshing feeds in the app._")
+    lines.append("## Immediate actions")
+    for a in (s.get("immediate_actions") or []):
+        lines.append(f"- {a}")
     lines.append("")
 
     lines.append("## Detailed plan")
     for it in items:
-        lines.append(f"### {it.get('title', 'Recommendation')}")
+        lines.append(f"### {it.get('title','Recommendation')}")
         lines.append("")
         lines.append("**Why it matters**")
         for w in it.get("why", []):
@@ -1030,11 +1100,94 @@ def render_plan_markdown(plan: Dict[str, Any]) -> str:
             lines.append(f"- {d}")
         lines.append("")
 
+    lines.append("---")
+    lines.append("Generated by the app using free sources and local model inference.")
+    return "\n".join(lines)
+
+
+def build_full_report_markdown(
+    *,
+    country_label: Optional[str],
+    inputs: Dict[str, Any],
+    model_kind: str,
+    base_need: float,
+    overlays: Dict[str, float],
+    map_signals: Optional[Dict[str, Any]],
+    offline_signals: Optional[Dict[str, Any]],
+    gdelt_df: Optional[pd.DataFrame],
+    relief_df: Optional[pd.DataFrame],
+    usgs_df: Optional[pd.DataFrame],
+    eonet_df: Optional[pd.DataFrame],
+    meteo_summary: Optional[Dict[str, Any]],
+    confidence: float,
+    limitations: List[str],
+) -> str:
+    combined = clamp(base_need + sum(float(v) for v in (overlays or {}).values()), 0, 100)
+    risk, _ = risk_bucket(combined)
+
+    links = build_evidence_links(gdelt_df, relief_df, usgs_df, eonet_df)
+
+    lines: List[str] = []
+    lines.append("# Infrastructure Risk Brief")
+    lines.append("")
+    lines.append(f"**Risk level:** {risk}")
+    lines.append(f"**Combined need:** {combined:0.1f}%")
+    lines.append(f"**Base need:** {base_need:0.1f}% _(model: {model_kind})_")
+    lines.append(f"**Confidence (heuristic):** {confidence*100:0.0f}%")
+    lines.append("")
+
+    if country_label:
+        lines.append(f"**Context:** Country code `{country_label}`")
+        lines.append("")
+
+    lines.append("## Inputs")
+    for k in FEATURES:
+        lines.append(f"- {k}: {inputs.get(k)}")
+    lines.append("")
+
+    lines.append("## Overlay breakdown")
+    for k, v in (overlays or {}).items():
+        lines.append(f"- {k}: {float(v):+0.1f}")
+    lines.append("")
+
+    if meteo_summary:
+        lines.append("## Weather snapshot (Open-Meteo)")
+        for k, v in meteo_summary.items():
+            lines.append(f"- {k}: {v}")
+        lines.append("")
+
+    if map_signals:
+        lines.append("## Live map signals (Overpass)")
+        for k, v in map_signals.items():
+            lines.append(f"- {k}: {v}")
+        lines.append("")
+
+    if offline_signals:
+        lines.append("## Offline map signals (Uploaded GeoJSON)")
+        for k, v in offline_signals.items():
+            lines.append(f"- {k}: {v}")
+        lines.append("")
+
+    lines.append("## Evidence links")
+    for src, arr in links.items():
+        if not arr:
+            continue
+        lines.append(f"### {src}")
+        for it in arr:
+            t = it.get("title", "").strip()
+            u = it.get("url", "").strip()
+            d = it.get("date", "").strip()
+            if u:
+                lines.append(f"- [{t}]({u}) ({d})")
+            else:
+                lines.append(f"- {t} ({d})")
+        lines.append("")
+
     lines.append("## Limitations")
-    for l in limitations:
-        lines.append(f"- {l}")
+    for x in (limitations or [])[:12]:
+        lines.append(f"- {x}")
     lines.append("")
 
     lines.append("---")
-    lines.append("Generated using local model inference and free public sources (OSM/Overpass, GDELT, ReliefWeb, USGS, Open-Meteo, NASA EONET).")
+    lines.append("Generated by the app using free sources and local model inference.")
     return "\n".join(lines)
