@@ -1,4 +1,4 @@
-import time
+# app.py
 import os
 from datetime import datetime
 from typing import Dict, Any
@@ -30,8 +30,8 @@ from utils import (
     open_meteo_overlay_points,
     fetch_eonet_events_near,
     eonet_overlay_points,
-    recommendations,
-    build_report_markdown,
+    recommendations_detailed,
+    render_plan_markdown,
 )
 
 st.set_page_config(page_title="Global Infrastructure AI", page_icon="🌍", layout="wide", initial_sidebar_state="expanded")
@@ -401,25 +401,16 @@ def render_hazard_overlays():
     with col2:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown("### Weather (Open-Meteo)")
-        now = time.time()
-last = st.session_state.get("meteo_last_call", 0.0)
-cooldown_s = 25
-
-can_call = (now - last) > cooldown_s
-label = "Refresh Weather" if can_call else f"Refresh Weather (wait {int(cooldown_s - (now-last))}s)"
-
-if st.button(label, use_container_width=True, disabled=not can_call):
-    st.session_state["meteo_last_call"] = now
-    with st.spinner("Fetching weather..."):
-        j, err = fetch_open_meteo(lat, lon)
-        st.session_state["meteo_json"] = j
-        st.session_state["meteo_err"] = err
-        pts2, summary = open_meteo_overlay_points(j)
-        st.session_state["meteo_pts"] = float(pts2)
-        st.session_state["meteo_summary"] = summary
-
-        pts = float(st.session_state.get("meteo_pts", 0.0))
-        st.metric("Overlay points", f"{pts:0.1f} / 6")
+        if st.button("Refresh Weather", use_container_width=True):
+            with st.spinner("Fetching weather..."):
+                j, err = fetch_open_meteo(lat, lon)
+                st.session_state["meteo_json"] = j
+                st.session_state["meteo_err"] = err
+                pts2, summary = open_meteo_overlay_points(j)
+                st.session_state["meteo_pts"] = float(pts2)
+                st.session_state["meteo_summary"] = summary
+        pts2 = float(st.session_state.get("meteo_pts", 0.0))
+        st.metric("Overlay points", f"{pts2:0.1f} / 6")
         if st.session_state.get("meteo_err"):
             st.warning(st.session_state["meteo_err"])
         summary = st.session_state.get("meteo_summary")
@@ -434,18 +425,17 @@ if st.button(label, use_container_width=True, disabled=not can_call):
         st.markdown("### Hazards (NASA EONET)")
         if st.button("Refresh EONET", use_container_width=True):
             with st.spinner("Fetching EONET events..."):
-                df, err = fetch_eonet_events_near(lat, lon, radius_km=500.0, limit=50)
-                st.session_state["eonet_df"] = df
+                df3, err = fetch_eonet_events_near(lat, lon, radius_km=500.0, limit=50)
+                st.session_state["eonet_df"] = df3
                 st.session_state["eonet_err"] = err
-        df = st.session_state.get("eonet_df", pd.DataFrame())
-        pts = eonet_overlay_points(df)
-        st.metric("Overlay points", f"{pts:0.1f} / 6")
-        st.session_state["eonet_pts"] = float(pts)
+        df3 = st.session_state.get("eonet_df", pd.DataFrame())
+        pts3 = eonet_overlay_points(df3)
+        st.metric("Overlay points", f"{pts3:0.1f} / 6")
+        st.session_state["eonet_pts"] = float(pts3)
         if st.session_state.get("eonet_err"):
             st.warning(st.session_state["eonet_err"])
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Tables
     st.markdown("---")
     dfu = st.session_state.get("usgs_df", pd.DataFrame())
     dfe = st.session_state.get("eonet_df", pd.DataFrame())
@@ -492,8 +482,8 @@ def render_combined():
     pred = st.session_state["single_pred"]
     base_need = float(pred["need"])
     base_kind = pred["model_kind"]
-    inputs = pred["input"]
-    country_label = pred["country"]
+    inputs = pred.get("input", {}) or {}
+    country_label = pred.get("country")
 
     map_adj = float(st.session_state.get("map_adjustment", 0.0))
     news_overlay = float(st.session_state.get("news_overlay", 0.0))
@@ -507,34 +497,113 @@ def render_combined():
     st.markdown(
         f"<span class='badge {badge_cls}'>{badge_text}</span> &nbsp; "
         f"<b>Combined Need</b>: <span style='font-size:1.8rem'>{combined:0.1f}%</span>"
-        f"<div class='small-muted'>Base: {base_kind} | Map: {map_adj:+.1f} | News: {news_overlay:+.1f} | USGS: {usgs_pts:+.1f} | Weather: {meteo_pts:+.1f} | EONET: {eonet_pts:+.1f}</div>",
+        f"<div class='small-muted'>Base: {base_kind} | Map: {map_adj:+.1f} | News: {news_overlay:+.1f} | "
+        f"USGS: {usgs_pts:+.1f} | Weather: {meteo_pts:+.1f} | EONET: {eonet_pts:+.1f}</div>",
         unsafe_allow_html=True,
     )
 
-    st.markdown("### Precautions & prevention")
-    for item in recommendations(base_need, map_adj + news_overlay + usgs_pts + meteo_pts + eonet_pts):
-        st.write(f"- {item}")
+    overlays = {
+        "map": map_adj,
+        "events": news_overlay,
+        "usgs": usgs_pts,
+        "weather": meteo_pts,
+        "eonet": eonet_pts,
+    }
+
+    evidence_pack = {
+        "gdelt_df": st.session_state.get("gdelt_df", pd.DataFrame()),
+        "relief_df": st.session_state.get("relief_df", pd.DataFrame()),
+        "usgs_df": st.session_state.get("usgs_df", pd.DataFrame()),
+        "eonet_df": st.session_state.get("eonet_df", pd.DataFrame()),
+        "meteo_summary": st.session_state.get("meteo_summary", {}),
+    }
+
+    plan = recommendations_detailed(
+        base_need=base_need,
+        overlays=overlays,
+        inputs=inputs,
+        map_signals=st.session_state.get("map_signals"),
+        evidence=evidence_pack,
+        model_kind=base_kind,
+    )
+
+    st.markdown("---")
+    st.subheader("Precautions & prevention")
+
+    summary = plan.get("summary", {})
+    st.markdown("#### Immediate actions")
+    for a in summary.get("immediate_actions", []):
+        st.write(f"- {a}")
+
+    st.markdown("#### Confidence")
+    st.write(f"- **Confidence:** {summary.get('confidence', 'N/A')}")
+    with st.expander("Limitations (read before client delivery)", expanded=False):
+        for l in plan.get("limitations", []):
+            st.write(f"- {l}")
+
+    with st.expander("Why this score (drivers)", expanded=False):
+        for r in summary.get("context_reasons", []):
+            st.write(f"- {r}")
+
+    st.markdown("#### Detailed plan")
+    for item in plan.get("items", []):
+        with st.expander(item.get("title", "Recommendation"), expanded=False):
+            st.markdown("**Why it matters**")
+            for w in item.get("why", []):
+                st.write(f"- {w}")
+
+            st.markdown("**Data gathered**")
+            for d in item.get("data_gathered", []):
+                st.write(f"- {d}")
+
+            st.markdown("**Steps (recommended sequence)**")
+            for i, step in enumerate(item.get("steps", []), start=1):
+                st.write(f"{i}. {step}")
+
+            st.markdown("**Deliverables (client-ready)**")
+            for d in item.get("deliverables", []):
+                st.write(f"- {d}")
+
+    with st.expander("Evidence links (GDELT/ReliefWeb/USGS/EONET)", expanded=False):
+        ev = plan.get("evidence", {})
+        for label, df, title_col in [
+            ("GDELT", ev.get("gdelt_df"), "title"),
+            ("ReliefWeb", ev.get("relief_df"), "title"),
+            ("USGS", ev.get("usgs_df"), "place"),
+            ("EONET", ev.get("eonet_df"), "title"),
+        ]:
+            st.markdown(f"**{label}**")
+            if isinstance(df, pd.DataFrame) and not df.empty and "url" in df.columns:
+                shown = 0
+                for _, r in df.iterrows():
+                    if shown >= 10:
+                        break
+                    title = str(r.get(title_col, "") or "").strip()
+                    url = str(r.get("url", "") or "").strip()
+                    if not url:
+                        continue
+                    if not title:
+                        title = url
+                    if len(title) > 110:
+                        title = title[:107] + "..."
+                    st.markdown(f"- [{title}]({url})")
+                    shown += 1
+                if shown == 0:
+                    st.caption("No valid links available for this feed.")
+            else:
+                st.caption("No data loaded. Refresh feeds in tabs first.")
+            st.markdown("")
 
     st.markdown("---")
     st.subheader("Download client-ready report")
-    md = build_report_markdown(
-        country_label=country_label,
-        inputs=inputs,
-        base_need=base_need,
-        model_kind=base_kind,
-        map_adj=map_adj,
-        news_overlay=news_overlay,
-        usgs_pts=usgs_pts,
-        meteo_pts=meteo_pts,
-        eonet_pts=eonet_pts,
-        map_signals=st.session_state.get("map_signals"),
-        gdelt_df=st.session_state.get("gdelt_df", pd.DataFrame()),
-        relief_df=st.session_state.get("relief_df", pd.DataFrame()),
-        usgs_df=st.session_state.get("usgs_df", pd.DataFrame()),
-        eonet_df=st.session_state.get("eonet_df", pd.DataFrame()),
-        meteo_summary=st.session_state.get("meteo_summary", {}),
+    md = render_plan_markdown(plan)
+    st.download_button(
+        "Download report.md",
+        data=md.encode("utf-8"),
+        file_name="infrastructure_risk_report.md",
+        mime="text/markdown",
+        use_container_width=True,
     )
-    st.download_button("Download report.md", data=md.encode("utf-8"), file_name="infrastructure_risk_report.md", mime="text/markdown", use_container_width=True)
 
 
 def main():
