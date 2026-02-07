@@ -1,7 +1,8 @@
 # app.py
 import os
+import json
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 import pandas as pd
 import streamlit as st
@@ -30,8 +31,16 @@ from utils import (
     open_meteo_overlay_points,
     fetch_eonet_events_near,
     eonet_overlay_points,
+    # Offline map
+    parse_geojson_bytes,
+    offline_signals_within_radius,
+    offline_overlay_points,
+    # Plan + report
     recommendations_detailed,
     render_plan_markdown,
+    compute_confidence,
+    build_evidence_links,
+    build_full_report_markdown,
 )
 
 st.set_page_config(page_title="Global Infrastructure AI", page_icon="🌍", layout="wide", initial_sidebar_state="expanded")
@@ -106,7 +115,7 @@ def sample_csv_bytes() -> bytes:
 
 def render_header():
     st.title("🌍 Global Infrastructure AI")
-    st.caption("Local model inference + free live signals (OSM, USGS, Open-Meteo, EONET, GDELT, ReliefWeb).")
+    st.caption("Local model inference + free live signals (OSM, USGS, Open-Meteo, EONET, GDELT, ReliefWeb) + Offline GeoJSON environment overlay.")
     st.markdown("<div class='small-muted'>If a feed is rate-limited, the app shows a message and continues.</div>", unsafe_allow_html=True)
 
 
@@ -119,7 +128,7 @@ def render_sidebar() -> Dict[str, Any]:
         st.write("Model files expected:")
         st.code("models/infra_model.onnx\nmodels/infra_model.joblib (optional)", language="text")
 
-        radius_m = st.slider("Map signals radius (meters)", 1000, 20000, DEFAULT_RADIUS_M, step=500)
+        radius_m = st.slider("Analysis radius (meters)", 1000, 20000, DEFAULT_RADIUS_M, step=500)
         if radius_m > 10000:
             st.warning("Large radius can timeout. If signals fail, use 3000–7000m.")
 
@@ -128,13 +137,14 @@ def render_sidebar() -> Dict[str, Any]:
         st.download_button("Download sample.csv", data=sample_csv_bytes(), file_name="sample.csv", mime="text/csv", use_container_width=True)
 
         st.markdown("---")
-        st.write("Live sources (free):")
+        st.write("Free sources used:")
         st.write("- OpenStreetMap (Overpass)")
         st.write("- USGS Earthquakes")
         st.write("- Open-Meteo Weather")
         st.write("- NASA EONET Hazards")
         st.write("- GDELT News")
         st.write("- ReliefWeb Reports")
+        st.write("- Offline GeoJSON uploads (roads/POIs)")
 
         return {"show_debug": show_debug, "radius_m": int(radius_m)}
 
@@ -269,7 +279,7 @@ def render_predictor(default_df: pd.DataFrame):
 
 def render_map_and_location(cfg: Dict[str, Any]):
     st.subheader("Map signals (OpenStreetMap)")
-    st.caption("Click the map to fetch nearby infrastructure counts. Location is also used by USGS/Open-Meteo/EONET overlays.")
+    st.caption("Click the map to set analysis location. Location is used by hazard overlays and offline map overlay.")
 
     col1, col2 = st.columns([1.2, 1])
 
@@ -296,7 +306,7 @@ def render_map_and_location(cfg: Dict[str, Any]):
             st.write(f"Selected point: `{lat:.5f}, {lon:.5f}`")
 
             radius_m = int(cfg["radius_m"])
-            with st.spinner("Fetching map signals..."):
+            with st.spinner("Fetching live map signals (Overpass)..."):
                 sig, msg, endpoint = fetch_overpass_signals(lat, lon, radius_m)
                 if sig is None:
                     st.warning(msg)
@@ -304,7 +314,7 @@ def render_map_and_location(cfg: Dict[str, Any]):
                     st.session_state["map_signals"] = sig
                     st.success(msg)
                     if endpoint:
-                        st.markdown("Endpoint used (not clickable):")
+                        st.caption("Endpoint used:")
                         st.code(endpoint, language="text")
 
         st.markdown("</div>", unsafe_allow_html=True)
@@ -312,12 +322,81 @@ def render_map_and_location(cfg: Dict[str, Any]):
     if "map_signals" in st.session_state:
         sig = st.session_state["map_signals"]
         st.markdown("---")
-        st.subheader("Signals")
+        st.subheader("Live signals")
         st.json(sig)
         adj = map_context_adjustment(sig)
         st.markdown("### Context adjustment")
         st.write(f"Adjustment suggested: **{adj:+.1f}** points.")
         st.session_state["map_adjustment"] = float(adj)
+
+
+def render_offline_map(cfg: Dict[str, Any]):
+    st.subheader("Offline Map Upload (GeoJSON)")
+    st.caption("Upload your offline environment as GeoJSON. Use: roads.geojson (LineString) + pois.geojson (Point).")
+
+    col1, col2 = st.columns([1.2, 1])
+
+    with col1:
+        roads_file = st.file_uploader("Upload roads.geojson", type=["geojson", "json"], key="roads_geojson")
+        pois_file = st.file_uploader("Upload pois.geojson", type=["geojson", "json"], key="pois_geojson")
+
+        if roads_file is not None:
+            j, msg = parse_geojson_bytes(roads_file.read())
+            if j is None:
+                st.error(msg)
+            else:
+                st.success("roads.geojson loaded.")
+                st.session_state["offline_roads_geojson"] = j
+
+        if pois_file is not None:
+            j, msg = parse_geojson_bytes(pois_file.read())
+            if j is None:
+                st.error(msg)
+            else:
+                st.success("pois.geojson loaded.")
+                st.session_state["offline_pois_geojson"] = j
+
+        st.markdown("---")
+        st.caption("Tip: Select a location on the Map tab first, then calculate offline signals here.")
+
+    with col2:
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.markdown("### Compute offline signals at selected location")
+
+        lat = st.session_state.get("analysis_lat")
+        lon = st.session_state.get("analysis_lon")
+        if lat is None or lon is None:
+            st.info("Select a location on the Map tab first.")
+            st.markdown("</div>", unsafe_allow_html=True)
+            return
+
+        st.write(f"Selected point: `{lat:.5f}, {lon:.5f}`")
+        radius_m = int(cfg["radius_m"])
+
+        has_roads = "offline_roads_geojson" in st.session_state
+        has_pois = "offline_pois_geojson" in st.session_state
+
+        if not (has_roads or has_pois):
+            st.warning("Upload at least one GeoJSON file first.")
+            st.markdown("</div>", unsafe_allow_html=True)
+            return
+
+        if st.button("Compute offline overlay", use_container_width=True, type="primary"):
+            roads_j = st.session_state.get("offline_roads_geojson")
+            pois_j = st.session_state.get("offline_pois_geojson")
+            sig = offline_signals_within_radius(roads_j, pois_j, float(lat), float(lon), radius_m)
+            st.session_state["offline_signals"] = sig
+            pts = offline_overlay_points(sig)
+            st.session_state["offline_pts"] = float(pts)
+            st.success(f"Offline signals computed. Overlay points: {pts:0.1f}/10")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    if "offline_signals" in st.session_state:
+        st.markdown("---")
+        st.subheader("Offline signals")
+        st.json(st.session_state["offline_signals"])
+        st.metric("Offline overlay points", f"{float(st.session_state.get('offline_pts', 0.0)):0.1f} / 10")
 
 
 def render_live_events():
@@ -375,7 +454,7 @@ def render_hazard_overlays():
     lon = st.session_state.get("analysis_lon")
 
     if lat is None or lon is None:
-        st.info("Select a location on the map first (Map tab).")
+        st.info("Select a location on the Map tab first (Map tab).")
         return
 
     col1, col2, col3 = st.columns(3)
@@ -471,7 +550,7 @@ def render_model_status(cfg: Dict[str, Any]):
         st.write("Features:", FEATURES)
 
 
-def render_combined():
+def render_combined(cfg: Dict[str, Any]):
     st.markdown("---")
     st.subheader("Combined Risk View")
 
@@ -490,15 +569,16 @@ def render_combined():
     usgs_pts = float(st.session_state.get("usgs_pts", 0.0))
     meteo_pts = float(st.session_state.get("meteo_pts", 0.0))
     eonet_pts = float(st.session_state.get("eonet_pts", 0.0))
+    offline_pts = float(st.session_state.get("offline_pts", 0.0))
 
-    combined = clamp(base_need + map_adj + news_overlay + usgs_pts + meteo_pts + eonet_pts, 0, 100)
+    combined = clamp(base_need + map_adj + news_overlay + usgs_pts + meteo_pts + eonet_pts + offline_pts, 0, 100)
     badge_text, badge_cls = risk_bucket(combined)
 
     st.markdown(
         f"<span class='badge {badge_cls}'>{badge_text}</span> &nbsp; "
         f"<b>Combined Need</b>: <span style='font-size:1.8rem'>{combined:0.1f}%</span>"
-        f"<div class='small-muted'>Base: {base_kind} | Map: {map_adj:+.1f} | News: {news_overlay:+.1f} | "
-        f"USGS: {usgs_pts:+.1f} | Weather: {meteo_pts:+.1f} | EONET: {eonet_pts:+.1f}</div>",
+        f"<div class='small-muted'>Base: {base_kind} | Live map: {map_adj:+.1f} | News: {news_overlay:+.1f} | "
+        f"USGS: {usgs_pts:+.1f} | Weather: {meteo_pts:+.1f} | EONET: {eonet_pts:+.1f} | Offline: {offline_pts:+.1f}</div>",
         unsafe_allow_html=True,
     )
 
@@ -508,14 +588,7 @@ def render_combined():
         "usgs": usgs_pts,
         "weather": meteo_pts,
         "eonet": eonet_pts,
-    }
-
-    evidence_pack = {
-        "gdelt_df": st.session_state.get("gdelt_df", pd.DataFrame()),
-        "relief_df": st.session_state.get("relief_df", pd.DataFrame()),
-        "usgs_df": st.session_state.get("usgs_df", pd.DataFrame()),
-        "eonet_df": st.session_state.get("eonet_df", pd.DataFrame()),
-        "meteo_summary": st.session_state.get("meteo_summary", {}),
+        "offline_map": offline_pts,
     }
 
     plan = recommendations_detailed(
@@ -523,8 +596,18 @@ def render_combined():
         overlays=overlays,
         inputs=inputs,
         map_signals=st.session_state.get("map_signals"),
-        evidence=evidence_pack,
+        offline_signals=st.session_state.get("offline_signals"),
+    )
+
+    # Evidence / Confidence / Limitations
+    has_location = (st.session_state.get("analysis_lat") is not None and st.session_state.get("analysis_lon") is not None)
+    has_offline_map = ("offline_signals" in st.session_state)
+    conf, limitations = compute_confidence(
         model_kind=base_kind,
+        base_need=base_need,
+        overlays=overlays,
+        has_location=has_location,
+        has_offline_map=has_offline_map,
     )
 
     st.markdown("---")
@@ -535,15 +618,42 @@ def render_combined():
     for a in summary.get("immediate_actions", []):
         st.write(f"- {a}")
 
-    st.markdown("#### Confidence")
-    st.write(f"- **Confidence:** {summary.get('confidence', 'N/A')}")
-    with st.expander("Limitations (read before client delivery)", expanded=False):
-        for l in plan.get("limitations", []):
-            st.write(f"- {l}")
+    # Readable evidence section
+    with st.expander("Evidence (readable) + Confidence + Limitations", expanded=True):
+        st.markdown(f"**Confidence (heuristic):** `{conf*100:0.0f}%`")
+        st.markdown("**What drove this score:**")
+        reasons = summary.get("context_reasons", []) or []
+        if reasons:
+            for r in reasons[:14]:
+                st.write(f"- {r}")
+        else:
+            st.write("- No specific drivers captured (run map + overlays for richer evidence).")
 
-    with st.expander("Why this score (drivers)", expanded=False):
-        for r in summary.get("context_reasons", []):
-            st.write(f"- {r}")
+        st.markdown("**Limitations:**")
+        for x in (limitations or [])[:12]:
+            st.write(f"- {x}")
+
+        st.markdown("**Evidence links (feeds):**")
+        links = build_evidence_links(
+            st.session_state.get("gdelt_df", pd.DataFrame()),
+            st.session_state.get("relief_df", pd.DataFrame()),
+            st.session_state.get("usgs_df", pd.DataFrame()),
+            st.session_state.get("eonet_df", pd.DataFrame()),
+        )
+        any_links = False
+        for src, arr in links.items():
+            if not arr:
+                continue
+            any_links = True
+            st.markdown(f"**{src}:**")
+            for it in arr[:6]:
+                title = it.get("title", "Link")
+                url = it.get("url", "")
+                date = it.get("date", "")
+                if url:
+                    st.markdown(f"- [{title}]({url})  <span class='small-muted'>{date}</span>", unsafe_allow_html=True)
+        if not any_links:
+            st.write("- No feed links available yet (fetch News/Reports and refresh hazards).")
 
     st.markdown("#### Detailed plan")
     for item in plan.get("items", []):
@@ -564,42 +674,30 @@ def render_combined():
             for d in item.get("deliverables", []):
                 st.write(f"- {d}")
 
-    with st.expander("Evidence links (GDELT/ReliefWeb/USGS/EONET)", expanded=False):
-        ev = plan.get("evidence", {})
-        for label, df, title_col in [
-            ("GDELT", ev.get("gdelt_df"), "title"),
-            ("ReliefWeb", ev.get("relief_df"), "title"),
-            ("USGS", ev.get("usgs_df"), "place"),
-            ("EONET", ev.get("eonet_df"), "title"),
-        ]:
-            st.markdown(f"**{label}**")
-            if isinstance(df, pd.DataFrame) and not df.empty and "url" in df.columns:
-                shown = 0
-                for _, r in df.iterrows():
-                    if shown >= 10:
-                        break
-                    title = str(r.get(title_col, "") or "").strip()
-                    url = str(r.get("url", "") or "").strip()
-                    if not url:
-                        continue
-                    if not title:
-                        title = url
-                    if len(title) > 110:
-                        title = title[:107] + "..."
-                    st.markdown(f"- [{title}]({url})")
-                    shown += 1
-                if shown == 0:
-                    st.caption("No valid links available for this feed.")
-            else:
-                st.caption("No data loaded. Refresh feeds in tabs first.")
-            st.markdown("")
-
     st.markdown("---")
     st.subheader("Download client-ready report")
-    md = render_plan_markdown(plan)
+
+    # Full report (includes confidence/limitations + evidence links)
+    report_md = build_full_report_markdown(
+        country_label=country_label,
+        inputs=inputs,
+        model_kind=base_kind,
+        base_need=base_need,
+        overlays=overlays,
+        map_signals=st.session_state.get("map_signals"),
+        offline_signals=st.session_state.get("offline_signals"),
+        gdelt_df=st.session_state.get("gdelt_df", pd.DataFrame()),
+        relief_df=st.session_state.get("relief_df", pd.DataFrame()),
+        usgs_df=st.session_state.get("usgs_df", pd.DataFrame()),
+        eonet_df=st.session_state.get("eonet_df", pd.DataFrame()),
+        meteo_summary=st.session_state.get("meteo_summary", {}),
+        confidence=conf,
+        limitations=limitations,
+    )
+
     st.download_button(
         "Download report.md",
-        data=md.encode("utf-8"),
+        data=report_md.encode("utf-8"),
         file_name="infrastructure_risk_report.md",
         mime="text/markdown",
         use_container_width=True,
@@ -612,7 +710,7 @@ def main():
 
     default_df = build_default_country_df()
 
-    tabs = st.tabs(["📊 Dashboard", "🤖 Predictor", "🗺️ Map", "🛰️ News/Reports", "🌋 Hazards", "✅ Model Status"])
+    tabs = st.tabs(["📊 Dashboard", "🤖 Predictor", "🗺️ Map", "🗃️ Offline Map", "🛰️ News/Reports", "🌋 Hazards", "✅ Model Status"])
 
     with tabs[0]:
         render_dashboard(default_df)
@@ -624,18 +722,21 @@ def main():
         render_map_and_location(cfg)
 
     with tabs[3]:
-        render_live_events()
+        render_offline_map(cfg)
 
     with tabs[4]:
-        render_hazard_overlays()
+        render_live_events()
 
     with tabs[5]:
+        render_hazard_overlays()
+
+    with tabs[6]:
         render_model_status(cfg)
 
-    render_combined()
+    render_combined(cfg)
 
     st.markdown("---")
-    st.caption(f"Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} | Free feeds: OSM + USGS + Open-Meteo + EONET + GDELT + ReliefWeb")
+    st.caption(f"Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} | Free feeds + offline GeoJSON overlay")
 
 
 if __name__ == "__main__":
