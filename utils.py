@@ -1,3 +1,4 @@
+# utils.py
 import os
 import time
 import math
@@ -116,7 +117,7 @@ def request_json(
             )
             code = r.status_code
 
-            # Handle rate limiting / temporary failures with retry
+            # Retry for temporary failures / rate limiting
             if code in (429, 500, 502, 503, 504):
                 if attempt < max_retries - 1:
                     _sleep_backoff(attempt)
@@ -416,7 +417,7 @@ def disaster_overlay_score(gdelt_df: pd.DataFrame, relief_df: pd.DataFrame) -> f
 
 
 # -----------------------------
-# NEW: USGS earthquakes (free)
+# USGS earthquakes (free)
 # -----------------------------
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     R = 6371.0
@@ -462,13 +463,9 @@ def fetch_usgs_earthquakes_near(lat: float, lon: float, radius_km: float = 300.0
 
 
 def usgs_overlay_points(eq_df: pd.DataFrame) -> float:
-    """
-    0..8 overlay points based on nearby quakes (last day feed).
-    """
     if eq_df is None or not isinstance(eq_df, pd.DataFrame) or eq_df.empty:
         return 0.0
 
-    # weigh by magnitude
     mags = pd.to_numeric(eq_df.get("mag", pd.Series([], dtype=float)), errors="coerce").dropna()
     if mags.empty:
         return min(2.0, len(eq_df) * 0.2)
@@ -489,7 +486,7 @@ def usgs_overlay_points(eq_df: pd.DataFrame) -> float:
 
 
 # -----------------------------
-# NEW: Open-Meteo (free)
+# Open-Meteo (free)
 # -----------------------------
 def fetch_open_meteo(lat: float, lon: float) -> Tuple[Optional[dict], Optional[str]]:
     params = {
@@ -500,13 +497,12 @@ def fetch_open_meteo(lat: float, lon: float) -> Tuple[Optional[dict], Optional[s
         "forecast_days": 3,
     }
 
-    # More patient retries for 429
     j, err, code = request_json(
         "GET",
         OPEN_METEO_URL,
         params=params,
         timeout=20,
-        max_retries=5,   # was 3
+        max_retries=5,
     )
 
     if j is None:
@@ -516,12 +512,7 @@ def fetch_open_meteo(lat: float, lon: float) -> Tuple[Optional[dict], Optional[s
     return j, None
 
 
-
 def open_meteo_overlay_points(meteo_json: Optional[dict]) -> Tuple[float, Dict[str, Any]]:
-    """
-    0..6 overlay points from heavy rain / strong wind heuristic.
-    Also returns a small summary dict.
-    """
     if not meteo_json:
         return 0.0, {}
 
@@ -541,12 +532,10 @@ def open_meteo_overlay_points(meteo_json: Optional[dict]) -> Tuple[float, Dict[s
         except Exception:
             return float("nan")
 
-    # use day0 as near-term
     rain0 = _safe_idx(rain, 0)
     wind0 = _safe_idx(wind, 0)
 
     pts = 0.0
-    # Rain thresholds (mm/day)
     if not math.isnan(rain0):
         if rain0 >= 50:
             pts += 4.0
@@ -555,7 +544,6 @@ def open_meteo_overlay_points(meteo_json: Optional[dict]) -> Tuple[float, Dict[s
         elif rain0 >= 10:
             pts += 1.0
 
-    # Wind thresholds (km/h equivalent depends on unit; Open-Meteo wind_speed_10m_max is usually km/h)
     if not math.isnan(wind0):
         if wind0 >= 70:
             pts += 3.0
@@ -577,14 +565,10 @@ def open_meteo_overlay_points(meteo_json: Optional[dict]) -> Tuple[float, Dict[s
 
 
 # -----------------------------
-# NEW: NASA EONET (free)
+# NASA EONET (free)
 # -----------------------------
 def fetch_eonet_events_near(lat: float, lon: float, radius_km: float = 500.0, limit: int = 30) -> Tuple[pd.DataFrame, Optional[str]]:
-    # EONET supports filters; we will fetch open events with limit, then filter by distance
-    params = {
-        "status": "open",
-        "limit": int(limit),
-    }
+    params = {"status": "open", "limit": int(limit)}
     j, err, code = request_json("GET", EONET_EVENTS_URL, params=params, timeout=20, max_retries=3)
     if j is None:
         return pd.DataFrame(), f"EONET unavailable: {err or code}"
@@ -599,7 +583,6 @@ def fetch_eonet_events_near(lat: float, lon: float, radius_km: float = 500.0, li
         cat_names = ", ".join([c.get("title") for c in categories if isinstance(c, dict)])
 
         geoms = ev.get("geometry") or []
-        # find any geometry point close
         best_dist = None
         best_lat = None
         best_lon = None
@@ -635,16 +618,12 @@ def fetch_eonet_events_near(lat: float, lon: float, radius_km: float = 500.0, li
 
 
 def eonet_overlay_points(eo_df: pd.DataFrame) -> float:
-    """
-    0..6 overlay points based on number + category rough weighting.
-    """
     if eo_df is None or not isinstance(eo_df, pd.DataFrame) or eo_df.empty:
         return 0.0
 
     pts = min(3.0, len(eo_df) * 0.4)
 
     cats = " ".join([str(x).lower() for x in eo_df.get("categories", [])])
-    # rough category boosts
     if "wildfire" in cats:
         pts += 1.5
     if "severe storms" in cats or "storm" in cats:
@@ -657,127 +636,325 @@ def eonet_overlay_points(eo_df: pd.DataFrame) -> float:
     return clamp(pts, 0.0, 6.0)
 
 
-# -----------------------------
-# Recommendations + report
-# -----------------------------
-def recommendations(need: float, overlay_points: float) -> List[str]:
-    total = clamp(need + overlay_points, 0, 100)
+# =============================================================================
+# REPLACEMENT SECTION:
+# Detailed precautions + new report generator
+# =============================================================================
 
+def _tier(base_need: float, total_overlay: float) -> str:
+    total = clamp(base_need + total_overlay, 0, 100)
     if total >= 70:
-        return [
-            "Prioritize rapid assessment of roads, power, water, and healthcare capacity.",
-            "Activate emergency maintenance plan with defined response times and contractors.",
-            "Review drainage, slope stability, and backup power readiness immediately.",
-            "Run vulnerability audits for bridges, substations, and critical facilities.",
-            "Prepare contingency logistics for fuel, water, and medical access under disruption.",
-        ]
+        return "high"
     if total >= 40:
-        return [
-            "Plan targeted upgrades for transport corridors and utility reliability.",
-            "Improve resilience through redundancy, inspections, and preventive maintenance cycles.",
-            "Identify highest-risk assets and create a prioritized rehabilitation backlog.",
-            "Monitor hazard signals and define trigger-based response actions.",
-        ]
-    return [
-        "Maintain assets with preventive maintenance and routine inspections.",
-        "Build an asset inventory and basic condition scoring for critical infrastructure.",
-        "Add low-cost monitoring (checklists, reporting, scheduled inspections).",
-        "Review extreme weather preparedness and update response procedures.",
-    ]
+        return "medium"
+    return "low"
 
 
-def build_report_markdown(
+def recommendations_detailed(
     *,
-    country_label: Optional[str],
-    inputs: Dict[str, Any],
     base_need: float,
-    model_kind: str,
-    map_adj: float,
-    news_overlay: float,
-    usgs_pts: float,
-    meteo_pts: float,
-    eonet_pts: float,
-    map_signals: Optional[Dict[str, Any]],
-    gdelt_df: Optional[pd.DataFrame],
-    relief_df: Optional[pd.DataFrame],
-    usgs_df: Optional[pd.DataFrame],
-    eonet_df: Optional[pd.DataFrame],
-    meteo_summary: Optional[Dict[str, Any]],
-) -> str:
-    combined = clamp(base_need + map_adj + news_overlay + usgs_pts + meteo_pts + eonet_pts, 0, 100)
-    risk, _ = risk_bucket(combined)
+    overlays: Dict[str, float],
+    inputs: Dict[str, Any],
+    map_signals: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Returns a structured, client-ready plan:
+      {
+        "summary": { "immediate_actions": [...], "context_reasons":[...], "tier": "...", "combined": float },
+        "items": [ {title, why[], data_gathered[], steps[], deliverables[]} ... ],
+        "inputs": {...},
+        "overlays": {...},
+        "generated_at_utc": "..."
+      }
+    """
+    total_overlay = float(sum([float(v) for v in (overlays or {}).values()]))
+    combined = float(clamp(base_need + total_overlay, 0, 100))
+    tier = _tier(base_need, total_overlay)
 
-    lines = []
+    pop = safe_float(inputs.get("Population_Millions"), np.nan)
+    gdp = safe_float(inputs.get("GDP_per_capita_USD"), np.nan)
+    hdi = safe_float(inputs.get("HDI_Index"), np.nan)
+    urb = safe_float(inputs.get("Urbanization_Rate"), np.nan)
+
+    reasons: List[str] = []
+    if not math.isnan(gdp) and gdp < 5000:
+        reasons.append("Low GDP per capita increases maintenance backlog risk and funding constraints.")
+    if not math.isnan(hdi) and hdi < 0.65:
+        reasons.append("Lower HDI often correlates with weaker service reliability and limited redundancy.")
+    if not math.isnan(urb) and urb > 70:
+        reasons.append("High urbanization increases demand load and cascade risk during disruptions.")
+    if not math.isnan(pop) and pop > 100:
+        reasons.append("Large population increases consequence severity and response complexity.")
+
+    if map_signals:
+        roads = map_signals.get("roads", 0)
+        hos = map_signals.get("hospitals", 0)
+        powc = map_signals.get("power", 0)
+        wat = map_signals.get("water", 0)
+        if roads == 0:
+            reasons.append("Very low mapped road density near the selected point suggests access constraints.")
+        if (hos or 0) == 0:
+            reasons.append("No hospitals detected near the selected point (OSM), indicating limited nearby healthcare access.")
+        if (powc or 0) == 0:
+            reasons.append("No power infrastructure tags detected near the selected point (OSM), possible resilience concern.")
+        if (wat or 0) == 0:
+            reasons.append("No water-tower tags detected near the selected point (OSM), water storage visibility is limited.")
+
+    # Overlay-driven context
+    if overlays.get("events", 0) >= 6:
+        reasons.append("Elevated news/disaster activity increases near-term disruption likelihood.")
+    if overlays.get("usgs", 0) >= 3:
+        reasons.append("Recent nearby seismic activity increases infrastructure stress risk.")
+    if overlays.get("weather", 0) >= 2:
+        reasons.append("Weather indicators suggest near-term wind/rain stress.")
+    if overlays.get("eonet", 0) >= 2:
+        reasons.append("Nearby active hazard events detected in NASA EONET.")
+
+    immediate_actions: List[str] = []
+    if tier == "high":
+        immediate_actions = [
+            "Run a 24–72 hour critical asset status check (power, water, bridges, hospitals).",
+            "Establish an incident response contact list and confirm contractors/repair capacity.",
+            "Verify backup power and fuel logistics for critical sites.",
+            "Start daily situation reporting and define escalation triggers.",
+        ]
+    elif tier == "medium":
+        immediate_actions = [
+            "Prioritize top 10 highest-risk assets and schedule inspections.",
+            "Confirm spare parts availability and maintenance response time targets.",
+            "Review emergency procedures for storms/flooding and test communications.",
+        ]
+    else:
+        immediate_actions = [
+            "Maintain routine preventive maintenance and inspection cycles.",
+            "Create/refresh asset inventory and basic condition scoring.",
+            "Review seasonal preparedness checklist (storm, heat, heavy rain).",
+        ]
+
+    # Plan items (always provide 4 core items)
+    items: List[Dict[str, Any]] = []
+
+    # 1) Asset inventory + condition scoring
+    items.append({
+        "title": "Asset inventory and condition scoring (foundation)",
+        "why": [
+            "You cannot prioritize upgrades without knowing what assets exist and their condition.",
+            "Condition scoring reduces wasted spending and improves budget justification.",
+        ],
+        "data_gathered": [
+            "Inputs: GDP/HDI/urbanization/population indicators (macro risk drivers).",
+            "Map signals: nearby roads/hospitals/power/water tags (local context, if available).",
+            "Hazard overlays: USGS/Open-Meteo/EONET (near-term risk signals).",
+        ],
+        "steps": [
+            "List critical assets by sector: roads/bridges, power substations, water plants, hospitals, telecom nodes.",
+            "Assign a simple condition score (1–5) using inspection notes, age, failures, and visible defects.",
+            "Add criticality score (1–5): impact on population and cascading failures if down.",
+            "Compute priority = condition_weight + criticality_weight + hazard_weight, then rank top assets.",
+            "Store in a CSV and update monthly; keep evidence (photos, inspection forms).",
+        ],
+        "deliverables": [
+            "Asset register (CSV) with location, owner, condition score, criticality score, priority rank.",
+            "Top-risk list with justification notes.",
+            "Maintenance backlog list with cost/effort estimates (rough order).",
+        ],
+    })
+
+    # 2) Preventive maintenance + inspections
+    items.append({
+        "title": "Preventive maintenance and inspection program (reduce failures)",
+        "why": [
+            "Most outages come from deferred maintenance and undetected defects.",
+            "Structured inspections reduce emergency repair cost and downtime.",
+        ],
+        "data_gathered": [
+            "Local access/coverage from OSM signals (roads/services density).",
+            "Near-term triggers from weather (wind/rain) and hazard overlays.",
+        ],
+        "steps": [
+            "Define inspection frequencies: critical monthly/quarterly; non-critical semiannual/annual.",
+            "Create checklists per asset type (bridge deck, drainage, pumps, transformers, generators).",
+            "Set thresholds for action (e.g., corrosion level, vibration, leakage, repeated outages).",
+            "Log all work orders and failures; compute MTBF and repeat-failure hotspots.",
+            "Introduce quick fixes first: drainage clearing, vegetation control, sealing leaks, spare parts staging.",
+        ],
+        "deliverables": [
+            "Inspection calendar + checklists (PDF/Docs).",
+            "Work-order log template + KPI sheet (downtime, repeat failures, response time).",
+            "Monthly maintenance report summary for stakeholders.",
+        ],
+    })
+
+    # 3) Resilience upgrades + redundancy
+    items.append({
+        "title": "Resilience upgrades and redundancy (limit cascading failures)",
+        "why": [
+            "Redundancy prevents single-point failures from collapsing multiple services.",
+            "Upgrades targeted at critical nodes yield the highest ROI under constraints.",
+        ],
+        "data_gathered": [
+            "Macro constraints implied by GDP/HDI (budget/funding reality).",
+            "Hazard overlays for likely stressors (seismic, storms, flooding, wildfire).",
+        ],
+        "steps": [
+            "Identify single points of failure (one substation, one water main, one bridge access route).",
+            "Implement low-cost redundancy: alternate routing, backup generators, spare pumps/valves.",
+            "Harden critical sites: elevation of equipment, waterproofing, surge protection, fire breaks.",
+            "Define minimum service levels (e.g., hospitals require 48–72h backup power).",
+            "Plan phased upgrades: Phase 1 quick wins; Phase 2 medium capex; Phase 3 long-term modernization.",
+        ],
+        "deliverables": [
+            "Single-point-of-failure map/list and mitigation plan.",
+            "Resilience upgrade roadmap (phased) with estimated effort and expected impact.",
+            "Standard operating procedures for backup activation (power/water/IT).",
+        ],
+    })
+
+    # 4) Incident response + triggers
+    items.append({
+        "title": "Incident response plan with triggers (fast coordinated action)",
+        "why": [
+            "During floods/storms/seismic events, speed and coordination reduce damage and downtime.",
+            "Trigger-based actions prevent delayed decision making.",
+        ],
+        "data_gathered": [
+            "News/disaster activity (GDELT/ReliefWeb) as situational awareness input.",
+            "Weather and hazard overlays for early warning.",
+        ],
+        "steps": [
+            "Define triggers: rainfall/wind thresholds, quake magnitude nearby, active hazard proximity, repeated outage counts.",
+            "Assign roles: incident lead, utilities lead, transport lead, communications lead, logistics lead.",
+            "Prepare contact lists: contractors, spare parts vendors, fuel suppliers, emergency services.",
+            "Create a 1-page playbook: what to check first, how to isolate faults, how to communicate status.",
+            "Run a tabletop drill monthly; update the plan based on lessons learned.",
+        ],
+        "deliverables": [
+            "Incident Response Plan (IRP) + trigger matrix.",
+            "Contact list + escalation tree.",
+            "Daily/weekly situation report template.",
+        ],
+    })
+
+    # Adjust emphasis by tier (add more urgency text)
+    if tier == "high":
+        items.insert(0, {
+            "title": "Rapid critical infrastructure assessment (0–72 hours)",
+            "why": [
+                "High combined risk suggests elevated probability of disruption or existing fragility.",
+                "Early detection prevents secondary failures (power→water→healthcare).",
+            ],
+            "data_gathered": [
+                "Combined risk level derived from model output + overlays (map/news/hazards).",
+                "Local infrastructure density and hazard signals.",
+            ],
+            "steps": [
+                "Inspect: bridges/culverts/drainage, substations, water pumps, hospitals/clinics backup systems.",
+                "Check access routes for blockage risk; identify alternate routes.",
+                "Verify generator readiness, fuel stock, spare parts, and on-call repair teams.",
+                "Create a red/amber/green status board and update twice daily during the risk window.",
+            ],
+            "deliverables": [
+                "Critical asset status board (RAG) with owners and next actions.",
+                "Immediate repair list (top 5) and resource assignment.",
+            ],
+        })
+
+    plan = {
+        "summary": {
+            "tier": tier,
+            "combined_need": round(combined, 1),
+            "base_need": round(float(base_need), 1),
+            "total_overlay": round(float(total_overlay), 1),
+            "immediate_actions": immediate_actions,
+            "context_reasons": reasons[:10],
+        },
+        "items": items,
+        "inputs": {k: inputs.get(k) for k in FEATURES},
+        "overlays": overlays,
+        "generated_at_utc": datetime_utc_str(),
+    }
+    return plan
+
+
+def datetime_utc_str() -> str:
+    # avoid importing datetime at top to keep file minimal
+    import datetime as _dt
+    return _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+
+def render_plan_markdown(plan: Dict[str, Any]) -> str:
+    """
+    Convert plan dict into a client-ready Markdown report.
+    """
+    if not plan:
+        return "# Infrastructure Risk Brief\n\nNo plan data available.\n"
+
+    summary = plan.get("summary", {}) or {}
+    items = plan.get("items", []) or []
+    inputs = plan.get("inputs", {}) or {}
+    overlays = plan.get("overlays", {}) or {}
+
+    tier = str(summary.get("tier", "unknown")).upper()
+    combined = summary.get("combined_need", "n/a")
+    base_need = summary.get("base_need", "n/a")
+    total_overlay = summary.get("total_overlay", "n/a")
+
+    lines: List[str] = []
     lines.append("# Infrastructure Risk Brief")
     lines.append("")
-    lines.append(f"**Risk level:** {risk}")
-    lines.append(f"**Base need (model):** {base_need:0.1f}%  _(model: {model_kind})_")
-    lines.append("")
-    lines.append("## Overlay breakdown")
-    lines.append(f"- Map adjustment: {map_adj:+0.1f}")
-    lines.append(f"- News/disaster overlay: {news_overlay:+0.1f}")
-    lines.append(f"- Earthquakes (USGS): {usgs_pts:+0.1f}")
-    lines.append(f"- Weather (Open-Meteo): {meteo_pts:+0.1f}")
-    lines.append(f"- Hazards (NASA EONET): {eonet_pts:+0.1f}")
-    lines.append(f"- **Combined need:** {combined:0.1f}%")
+    lines.append(f"**Risk tier:** {tier}")
+    lines.append(f"**Combined need:** {combined}%")
+    lines.append(f"**Base need (model):** {base_need}%")
+    lines.append(f"**Total overlay points:** {total_overlay}")
+    lines.append(f"**Generated:** {plan.get('generated_at_utc', '')}")
     lines.append("")
 
-    if country_label:
-        lines.append("## Context")
-        lines.append(f"- Country code: `{country_label}`")
-        lines.append("")
+    lines.append("## Overlay breakdown")
+    for k in ["map", "events", "usgs", "weather", "eonet"]:
+        if k in overlays:
+            lines.append(f"- {k}: {overlays.get(k):+0.1f}")
+    lines.append("")
 
     lines.append("## Input indicators")
     for k in FEATURES:
         lines.append(f"- {k}: {inputs.get(k)}")
     lines.append("")
 
-    lines.append("## Recommendations")
-    for r in recommendations(base_need, map_adj + news_overlay + usgs_pts + meteo_pts + eonet_pts):
-        lines.append(f"- {r}")
-    lines.append("")
-
-    if meteo_summary:
-        lines.append("## Weather snapshot (Open-Meteo)")
-        for k, v in meteo_summary.items():
-            lines.append(f"- {k}: {v}")
+    ia = summary.get("immediate_actions", []) or []
+    if ia:
+        lines.append("## Immediate actions")
+        for x in ia:
+            lines.append(f"- {x}")
         lines.append("")
 
-    if map_signals:
-        lines.append("## Map signals (OpenStreetMap/Overpass)")
-        for k, v in map_signals.items():
-            lines.append(f"- {k}: {v}")
+    cr = summary.get("context_reasons", []) or []
+    if cr:
+        lines.append("## Key drivers (why this score)")
+        for x in cr:
+            lines.append(f"- {x}")
         lines.append("")
 
-    def _append_feed(df: pd.DataFrame, title: str, max_items: int = 8):
-        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-            return
-        lines.append(f"## {title}")
-        for _, row in df.head(max_items).iterrows():
-            t = str(row.get("title", "")).strip()
-            u = str(row.get("url", "")).strip()
-            d = str(row.get("date", "") or row.get("seendate", "")).strip()
-            if u:
-                lines.append(f"- [{t}]({u}) ({d})")
-            else:
-                lines.append(f"- {t} ({d})")
+    lines.append("## Detailed precautions & prevention plan")
+    for item in items:
+        lines.append(f"### {item.get('title','Recommendation')}")
         lines.append("")
-
-    _append_feed(gdelt_df, "Recent news signals (GDELT)")
-    _append_feed(relief_df, "Recent disaster reports (ReliefWeb)")
-
-    if usgs_df is not None and isinstance(usgs_df, pd.DataFrame) and not usgs_df.empty:
-        lines.append("## Nearby earthquakes (USGS)")
-        for _, r in usgs_df.head(10).iterrows():
-            lines.append(f"- M{r.get('mag')} | {r.get('distance_km')} km | {r.get('place')} | {r.get('url')}")
+        lines.append("**Why it matters**")
+        for w in item.get("why", []) or []:
+            lines.append(f"- {w}")
         lines.append("")
-
-    if eonet_df is not None and isinstance(eonet_df, pd.DataFrame) and not eonet_df.empty:
-        lines.append("## Nearby hazards (NASA EONET)")
-        for _, r in eonet_df.head(10).iterrows():
-            lines.append(f"- {r.get('categories')} | {r.get('distance_km')} km | {r.get('title')} | {r.get('url')}")
+        lines.append("**Data gathered**")
+        for d in item.get("data_gathered", []) or []:
+            lines.append(f"- {d}")
+        lines.append("")
+        lines.append("**Steps (recommended sequence)**")
+        for i, s in enumerate(item.get("steps", []) or [], start=1):
+            lines.append(f"{i}. {s}")
+        lines.append("")
+        lines.append("**Deliverables**")
+        for d in item.get("deliverables", []) or []:
+            lines.append(f"- {d}")
         lines.append("")
 
     lines.append("---")
-    lines.append("Generated by the app using free sources and local model inference.")
+    lines.append("This document is generated from the application's indicators and free public data feeds.")
     return "\n".join(lines)
