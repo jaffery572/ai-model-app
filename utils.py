@@ -499,10 +499,22 @@ def fetch_open_meteo(lat: float, lon: float) -> Tuple[Optional[dict], Optional[s
         "timezone": "UTC",
         "forecast_days": 3,
     }
-    j, err, code = request_json("GET", OPEN_METEO_URL, params=params, timeout=20, max_retries=3)
+
+    # More patient retries for 429
+    j, err, code = request_json(
+        "GET",
+        OPEN_METEO_URL,
+        params=params,
+        timeout=20,
+        max_retries=5,   # was 3
+    )
+
     if j is None:
+        if code == 429:
+            return None, "Open-Meteo rate-limited (429). Try again in ~1–2 minutes."
         return None, f"Open-Meteo unavailable: {err or code}"
     return j, None
+
 
 
 def open_meteo_overlay_points(meteo_json: Optional[dict]) -> Tuple[float, Dict[str, Any]]:
