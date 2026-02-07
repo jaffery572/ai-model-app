@@ -878,9 +878,7 @@ def recommendations_detailed(
 
 
 def datetime_utc_str() -> str:
-    # avoid importing datetime at top to keep file minimal
-    import datetime as _dt
-    return _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    return datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
 
 def render_plan_markdown(plan: Dict[str, Any]) -> str:
